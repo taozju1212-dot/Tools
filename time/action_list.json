@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "modes": [
+    {
+      "id": "A",
+      "name": "一步法"
+    },
+    {
+      "id": "B",
+      "name": "两步法"
+    }
+  ],
+  "modules": [
+    {
+      "id": "A",
+      "name": "ADP"
+    },
+    {
+      "id": "B",
+      "name": "摆渡车"
+    }
+  ],
+  "actions": [
+    {
+      "moduleId": "A",
+      "no": "00",
+      "name": "取TIP"
+    },
+    {
+      "moduleId": "A",
+      "no": "01",
+      "name": "取稀释液"
+    },
+    {
+      "moduleId": "B",
+      "no": "00",
+      "name": "取卡"
+    },
+    {
+      "moduleId": "B",
+      "no": "01",
+      "name": "放卡"
+    }
+  ],
+  "modeConfigs": []
+}

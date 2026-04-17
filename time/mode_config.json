@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "modes": [
+    {
+      "id": "A",
+      "name": "一步法"
+    },
+    {
+      "id": "B",
+      "name": ""
+    },
+    {
+      "id": "C",
+      "name": ""
+    },
+    {
+      "id": "D",
+      "name": ""
+    },
+    {
+      "id": "E",
+      "name": ""
+    }
+  ],
+  "modules": [
+    {
+      "id": "A",
+      "name": "ADP"
+    }
+  ],
+  "actions": [
+    {
+      "moduleId": "A",
+      "no": "00",
+      "name": "取TIP"
+    },
+    {
+      "moduleId": "A",
+      "no": "00",
+      "name": "取稀释液"
+    }
+  ],
+  "modeConfigs": [
+    {
+      "modeId": "A",
+      "beatTime": 30,
+      "step": 0.1,
+      "rows": [
+        {
+          "moduleId": "A",
+          "actionNo": "00",
+          "startTime": 0.1,
+          "prevActionKey": null,
+          "duration": 2.3
+        },
+        {
+          "moduleId": "A",
+          "actionNo": "00",
+          "startTime": null,
+          "prevActionKey": null,
+          "duration": 1.0
+        }
+      ]
+    }
+  ]
+}

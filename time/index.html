@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>全自动仪器节拍动作设计工具</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Automatic Instrument Rhythm Planner</p>
+        <h1>全自动仪器节拍动作设计工具</h1>
+        <p class="hero-copy">围绕模式、模块、动作与时序联动，完成节拍方案编辑、时间依赖编排与本地文件保存。</p>
+      </div>
+      <div class="hero-metrics">
+        <div class="metric-card">
+          <span>模式</span>
+          <strong id="modeCount">0</strong>
+        </div>
+        <div class="metric-card">
+          <span>模块</span>
+          <strong id="moduleCount">0</strong>
+        </div>
+        <div class="metric-card">
+          <span>动作</span>
+          <strong id="actionCount">0</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel">
+        <div class="panel-tabs">
+          <button class="tab-button active" data-tab-target="masterDataTab">一级动作列表</button>
+          <button class="tab-button" data-tab-target="rhythmTab">模式编辑</button>
+        </div>
+
+        <div class="tab-panel active" id="masterDataTab">
+          <div class="card-grid">
+            <article class="info-card">
+              <div class="card-header">
+                <div>
+                  <h2>模式编号</h2>
+                  <span>(A-Z)</span>
+                </div>
+                <button class="mini-btn" id="addModeBtn">+ Add</button>
+              </div>
+              <div class="card-form">
+                <label>
+                  编号
+                  <select id="modeCodeInput"></select>
+                </label>
+                <label>
+                  名称
+                  <input id="modeNameInput" type="text" maxlength="40" placeholder="请输入模式名称">
+                </label>
+                <button class="primary-btn" id="saveModeBtn">保存模式</button>
+              </div>
+              <div class="list-wrap" id="modeList"></div>
+            </article>
+
+            <article class="info-card">
+              <div class="card-header">
+                <div>
+                  <h2>模块编号</h2>
+                  <span>(A-Z)</span>
+                </div>
+                <button class="mini-btn" id="addModuleBtn">+ Add</button>
+              </div>
+              <div class="card-form">
+                <label>
+                  编号
+                  <select id="moduleCodeInput"></select>
+                </label>
+                <label>
+                  名称
+                  <input id="moduleNameInput" type="text" maxlength="40" placeholder="请输入模块名称">
+                </label>
+                <button class="primary-btn" id="saveModuleBtn">保存模块</button>
+              </div>
+              <div class="list-wrap" id="moduleList"></div>
+            </article>
+
+            <article class="info-card">
+              <div class="card-header">
+                <div>
+                  <h2>动作编号</h2>
+                  <span>(00-99)</span>
+                </div>
+                <button class="mini-btn" id="addActionBtn">+ Add</button>
+              </div>
+              <div class="card-form">
+                <label>
+                  所属模块
+                  <select id="actionModuleInput"></select>
+                </label>
+                <label>
+                  编号
+                  <select id="actionCodeInput"></select>
+                </label>
+                <label>
+                  名称
+                  <input id="actionNameInput" type="text" maxlength="40" placeholder="请输入动作名称">
+                </label>
+                <button class="primary-btn" id="saveActionBtn">保存动作</button>
+              </div>
+              <div class="list-wrap" id="actionList"></div>
+            </article>
+          </div>
+
+          <div class="toolbar">
+            <input type="file" id="fileLoader" accept=".json" hidden>
+            <button class="soft-btn" id="loadBtn">Load</button>
+            <button class="soft-btn" id="saveBtn">Save</button>
+            <button class="soft-btn" id="saveAsBtn">Save as</button>
+            <button class="soft-btn danger" id="clearBtn">Clear</button>
+            <span class="status-text" id="storageStatus">当前为示例数据，可直接编辑。</span>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="rhythmTab">
+          <div class="editor-toolbar">
+            <button class="soft-btn" id="editorLoadBtn">Load</button>
+            <label>
+              模式选择
+              <select id="editorModeSelect"></select>
+            </label>
+            <label>
+              节拍时间
+              <input id="beatDurationInput" type="number" min="1" step="1" placeholder="30">
+            </label>
+            <button class="primary-btn" id="generateTimelineBtn">OK</button>
+          </div>
+
+          <div class="editor-surface">
+            <div class="timeline-headline">
+              <div>
+                <h2 id="timelineTitle">未生成节拍方案</h2>
+                <p id="timelineSubtitle">选择模式并输入节拍时间后，将自动生成可编辑时序表。</p>
+              </div>
+              <button class="mini-btn ghost" id="addTimelineRowBtn">新增动作行</button>
+            </div>
+
+            <div class="timeline-wrap" id="timelineWrap">
+              <div class="timeline-empty">
+                <strong>等待生成时序表</strong>
+                <span>点击 OK 后，会按秒级节拍长度创建时间轴，并支持 0.1 秒级起始时间与前级动作联动。</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="listItemTemplate">
+    <div class="list-item">
+      <div class="list-main">
+        <strong class="item-code"></strong>
+        <span class="item-name"></span>
+      </div>
+      <div class="list-actions">
+        <button class="text-btn edit">编辑</button>
+        <button class="text-btn delete">删除</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="./script.js"></script>
+</body>
+</html>
