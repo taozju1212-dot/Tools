@@ -1,0 +1,2 @@
+E:\Agent\Code\.claude\worktrees\nifty-lehmann\fa120_log_parser.py:1775: DeprecationWarning: trace_variable() is deprecated and not supported with Tcl 9; use trace_add() instead.
+  self._search_var.trace("w", lambda *a: self._do_search())
