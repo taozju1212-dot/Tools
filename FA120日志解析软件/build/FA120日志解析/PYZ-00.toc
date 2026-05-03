@@ -1,4 +1,4 @@
-('E:\\Agent\\Code\\.claude\\worktrees\\nifty-lehmann\\build\\FA120日志解析\\PYZ-00.pyz',
+('E:\\Agent\\Github_local\\Tools\\FA120日志解析软件\\build\\FA120日志解析\\PYZ-00.pyz',
  [('__future__',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\__future__.py',
@@ -19,6 +19,10 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_compat_pickle.py',
    'PYMODULE'),
+  ('_ios_support',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_ios_support.py',
+   'PYMODULE'),
   ('_opcode_metadata',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_opcode_metadata.py',
@@ -38,6 +42,14 @@
   ('_pydecimal',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_pydecimal.py',
+   'PYMODULE'),
+  ('_pyrepl',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_pyrepl\\__init__.py',
+   'PYMODULE'),
+  ('_pyrepl.pager',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\_pyrepl\\pager.py',
    'PYMODULE'),
   ('_strptime',
    'C:\\Users\\Zhang '
@@ -155,6 +167,10 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\__init__.py',
    'PYMODULE'),
+  ('ctypes._aix',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\_aix.py',
+   'PYMODULE'),
   ('ctypes._endian',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\_endian.py',
@@ -162,6 +178,30 @@
   ('ctypes._layout',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\_layout.py',
+   'PYMODULE'),
+  ('ctypes.macholib',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\macholib\\__init__.py',
+   'PYMODULE'),
+  ('ctypes.macholib.dyld',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\macholib\\dyld.py',
+   'PYMODULE'),
+  ('ctypes.macholib.dylib',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\macholib\\dylib.py',
+   'PYMODULE'),
+  ('ctypes.macholib.framework',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\macholib\\framework.py',
+   'PYMODULE'),
+  ('ctypes.util',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\util.py',
+   'PYMODULE'),
+  ('ctypes.wintypes',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\ctypes\\wintypes.py',
    'PYMODULE'),
   ('dataclasses',
    'C:\\Users\\Zhang '
@@ -174,6 +214,46 @@
   ('decimal',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\decimal.py',
+   'PYMODULE'),
+  ('defusedxml',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\__init__.py',
+   'PYMODULE'),
+  ('defusedxml.ElementTree',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\ElementTree.py',
+   'PYMODULE'),
+  ('defusedxml.cElementTree',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\cElementTree.py',
+   'PYMODULE'),
+  ('defusedxml.common',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\common.py',
+   'PYMODULE'),
+  ('defusedxml.expatbuilder',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\expatbuilder.py',
+   'PYMODULE'),
+  ('defusedxml.expatreader',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\expatreader.py',
+   'PYMODULE'),
+  ('defusedxml.minidom',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\minidom.py',
+   'PYMODULE'),
+  ('defusedxml.pulldom',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\pulldom.py',
+   'PYMODULE'),
+  ('defusedxml.sax',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\sax.py',
+   'PYMODULE'),
+  ('defusedxml.xmlrpc',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\site-packages\\defusedxml\\xmlrpc.py',
    'PYMODULE'),
   ('difflib',
    'C:\\Users\\Zhang '
@@ -311,6 +391,14 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\hmac.py',
    'PYMODULE'),
+  ('html',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\html\\__init__.py',
+   'PYMODULE'),
+  ('html.entities',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\html\\entities.py',
+   'PYMODULE'),
   ('http',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\http\\__init__.py',
@@ -322,6 +410,10 @@
   ('http.cookiejar',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\http\\cookiejar.py',
+   'PYMODULE'),
+  ('http.server',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\http\\server.py',
    'PYMODULE'),
   ('importlib',
    'C:\\Users\\Zhang '
@@ -1271,6 +1363,10 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pkgutil.py',
    'PYMODULE'),
+  ('platform',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\platform.py',
+   'PYMODULE'),
   ('pprint',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pprint.py',
@@ -1278,6 +1374,22 @@
   ('py_compile',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\py_compile.py',
+   'PYMODULE'),
+  ('pydoc',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pydoc.py',
+   'PYMODULE'),
+  ('pydoc_data',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pydoc_data\\__init__.py',
+   'PYMODULE'),
+  ('pydoc_data.module_docs',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pydoc_data\\module_docs.py',
+   'PYMODULE'),
+  ('pydoc_data.topics',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\pydoc_data\\topics.py',
    'PYMODULE'),
   ('queue',
    'C:\\Users\\Zhang '
@@ -1303,6 +1415,10 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\selectors.py',
    'PYMODULE'),
+  ('shlex',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\shlex.py',
+   'PYMODULE'),
   ('shutil',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\shutil.py',
@@ -1314,6 +1430,10 @@
   ('socket',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\socket.py',
+   'PYMODULE'),
+  ('socketserver',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\socketserver.py',
    'PYMODULE'),
   ('ssl',
    'C:\\Users\\Zhang '
@@ -1403,6 +1523,10 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\tracemalloc.py',
    'PYMODULE'),
+  ('tty',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\tty.py',
+   'PYMODULE'),
   ('typing',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\typing.py',
@@ -1427,9 +1551,45 @@
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\urllib\\response.py',
    'PYMODULE'),
+  ('webbrowser',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\webbrowser.py',
+   'PYMODULE'),
   ('xml',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\__init__.py',
+   'PYMODULE'),
+  ('xml.dom',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\__init__.py',
+   'PYMODULE'),
+  ('xml.dom.NodeFilter',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\NodeFilter.py',
+   'PYMODULE'),
+  ('xml.dom.domreg',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\domreg.py',
+   'PYMODULE'),
+  ('xml.dom.expatbuilder',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\expatbuilder.py',
+   'PYMODULE'),
+  ('xml.dom.minicompat',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\minicompat.py',
+   'PYMODULE'),
+  ('xml.dom.minidom',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\minidom.py',
+   'PYMODULE'),
+  ('xml.dom.pulldom',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\pulldom.py',
+   'PYMODULE'),
+  ('xml.dom.xmlbuilder',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xml\\dom\\xmlbuilder.py',
    'PYMODULE'),
   ('xml.etree',
    'C:\\Users\\Zhang '
@@ -1490,6 +1650,10 @@
   ('xmlrpc.client',
    'C:\\Users\\Zhang '
    'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xmlrpc\\client.py',
+   'PYMODULE'),
+  ('xmlrpc.server',
+   'C:\\Users\\Zhang '
+   'Tao\\AppData\\Local\\Programs\\Python\\Python314\\Lib\\xmlrpc\\server.py',
    'PYMODULE'),
   ('zipfile',
    'C:\\Users\\Zhang '

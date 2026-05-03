@@ -8,16 +8,18 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import re
 import os
 import sys
+import json
 import concurrent.futures
 import multiprocessing
 from dataclasses import dataclass, field
+import tkinter.font as tkfont
 
 
 def _app_dir() -> str:
     """返回配置文件所在目录：打包为 EXE 时取 EXE 旁边的目录，否则取脚本目录。"""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    return _app_dir()
+    return os.path.dirname(os.path.abspath(__file__))
 
 # ── Color palette (Material Design) ─────────────────────────────────────────
 C_BG       = "#f4f7fc"   # 淡蓝白主背景
@@ -66,10 +68,13 @@ class SampleInfo:
     concentration: str = "" # 浓度
     measure_value: str = "" # 测量值
     missing_actions: list = None  # 缺失的一级动作编号列表（对比标准流程）
+    test_results: list = None     # 每项目测试结果: [{project_abbr, concentration, measure_value, finish_time}]
 
     def __post_init__(self):
         if self.missing_actions is None:
             self.missing_actions = []
+        if self.test_results is None:
+            self.test_results = []
 
 
 @dataclass
@@ -87,22 +92,26 @@ class Action:
     actual_raster: int = 0
     raster_deviation: int = 0
     _action_key: str = ""  # 用于关联 Start/Finish/MOTOR
+    source_line: int = 0   # 日志原文行号（1-based）
 
 
 @dataclass
 class Alarm:
     time_str: str        # 报警时间
     error_code: str      # 错误编号 "G-INJ-012"
+    display_code: str    # 原始报警编号（用于列表显示）
     sample_num: str      # 对应样本 "0005"
     action_code: str     # 对应动作 "E01"
     content: str         # 报警内容
     detail: str          # 详情
+    source_line: int = 0
 
 
 @dataclass
 class InstrumentInfo:
     device_serial: str = ""
     log_time: str = ""
+    log_range: str = ""
     user_program_version: str = ""
     request_count: int = 0
     detect_count: int = 0
@@ -111,9 +120,9 @@ class InstrumentInfo:
     ccid: str = ""
     signal_strength: str = ""
     mid_version: str = ""
+    mcu0_version: str = ""
     mcu1_version: str = ""
     mcu2_version: str = ""
-    mcu3_version: str = ""
     temp_control_version: str = ""
 
 
@@ -131,6 +140,8 @@ class UserActionRecord:
     action_type: str
     detail: str
     sample_serial: str = ""
+    source_line: int = 0
+    related_lines: list[int] = field(default_factory=list)
 
 
 # ── Log Parser ───────────────────────────────────────────────────────────────
@@ -138,7 +149,7 @@ class UserActionRecord:
 class LogParser:
     # 样本申请
     RE_SAMPLE = re.compile(
-        r'"#(\d+)-(\d{4})\s*"\s*"申请：样本架(\d+-\d+)，样本ID:(\w+),\s*测试数(\d+)，'
+        r'"#(\d+)-(\d{4})\s*"\s*"申请：样本架(\d+-\d+)，样本ID:(\w*),\s*测试数(\d+)，'
         r'开盖(\d)，摇匀(\d)，稀释倍数(\d+)"'
         r'.*?样本类型：\s*"([^"]+)".*?检测项目：\s*\(([^)]+)\)'
     )
@@ -175,21 +186,24 @@ class LogParser:
 
     # 报警  (样本号/模式/动作码均为可选)
     RE_ALARM = re.compile(
-        r'(\d{2}:\d{2}:\d{2}).*?报警信息\s*"([A-Z]+-[A-Z]+-\d+)-(\d{4,5})?([A-Z])?([A-Z]\d{2})?"\s*'
+        r'(\d{2}:\d{2}:\d{2}).*?报警信息\s*"([^"]+)"\s*'
         r'"([^"]*)"\s*"([^"]*)"\s*"([^"]*)"'
     )
 
     RE_TIME_PREFIX = re.compile(r'^(\d{2}:\d{2}:\d{2})')
     RE_SELF_CHECK = re.compile(r'Msg:\s*"([\d:.]+)"\s*"MCU([123])自检"')
     RE_SELF_CHECK_FAIL = re.compile(r'报警信息\s*"(G-OTH-20[234])')
+    RE_USER_LOGIN = re.compile(r'user:\s*"([^"]*)"', re.IGNORECASE)
     RE_DEVICE_SERIAL = re.compile(r'仪器序列号.*?"([^"]+)"')
     RE_CCID = re.compile(r'iccid\s*"([^"]+)"', re.IGNORECASE)
     RE_SIGNAL = re.compile(r'信号值\s+([^\r\n"]+)')
-    RE_MID_VERSION = re.compile(r'MCU4Mid version.*?"([^"]+)"', re.IGNORECASE)
-    RE_FW_VERSION = re.compile(r'MCU([1235])\s+SN:\s*".*?"\s*"([^"]+)"', re.IGNORECASE)
+    RE_MID_VERSION = re.compile(r'MCU3Mid version.*?"(v?1\.0[^"]*)"', re.IGNORECASE)
+    RE_FW_VERSION = re.compile(r'MCU([0124])\s+SN:\s*".*?"\s*"([^"]+)"', re.IGNORECASE)
     RE_STATS = re.compile(r'申请样本次数[:：](\d+)\s+检测次数(\d+)\s+开盖次数(\d+)')
     RE_LOAD_PROJECT = re.compile(r'导入项目(\d+)-(\d+).*?项目:([^\n"]+?)\s+批次:([A-Za-z0-9_-]+)', re.S)
     RE_LOAD_CARTRIDGE = re.compile(r'"[^"]*?(\d+)\(\)')
+    RE_DILUENT_SCAN = re.compile(r'试剂盘扫码([0-5])')
+    RE_BARCODE_CONTENT = re.compile(r'条码内容：([^"]*)')
     RE_TEST_RESULT = re.compile(
         r'"#\d+-(\d{4})(?:\s+-\d+)?"\s*测试完成\s+项目\s+"([^"]+)"\s+浓度\s+"([^"]+)"\s+测量值\s+(\S+)'
     )
@@ -218,6 +232,7 @@ class LogParser:
         self.instrument_info = InstrumentInfo()
         self.self_checks: list[SelfCheckRecord] = []
         self.user_actions: list[UserActionRecord] = []
+        self.raw_lines: list[str] = []
         self.standard_action_sequence: list[str] = []  # 兼容旧引用：当前日志样本0001的动作序列
         self.standard_sequences: dict[str, list[str]] = {}  # 模式名 -> 标准动作序列，按模式分类存储
 
@@ -349,6 +364,7 @@ class LogParser:
         self.instrument_info = InstrumentInfo()
         self.self_checks.clear()
         self.user_actions.clear()
+        self.raw_lines = []
 
         for enc in ('utf-8', 'gbk', 'gb2312', 'gb18030'):
             try:
@@ -359,14 +375,15 @@ class LogParser:
                 continue
         else:
             raise ValueError(f"无法解码文件: {path}")
+        self.raw_lines = [line.rstrip("\r\n") for line in lines]
 
         seen_alarms = set()
-        for line in lines:
+        for idx, line in enumerate(lines):
             self._parse_sample(line)
-            self._parse_start(line)
+            self._parse_start(line, idx + 1)
             self._parse_finish(line)
             self._parse_motor(line)
-            self._parse_alarm(line, seen_alarms)
+            self._parse_alarm(line, seen_alarms, idx + 1)
 
         self._parse_self_checks(lines)
         self._parse_user_actions(lines)
@@ -448,10 +465,13 @@ class LogParser:
                 break
         if log_date and start_time and end_time:
             info.log_time = f"{log_date} {start_time} - {end_time}"
+            info.log_range = f"{start_time} - {end_time}"
         elif log_date:
             info.log_time = log_date
+            info.log_range = f"{start_time} - {end_time}" if start_time and end_time else ""
         elif start_time and end_time:
             info.log_time = f"{start_time} - {end_time}"
+            info.log_range = info.log_time
         info.current_arrangement_count = len(self.samples)
 
         for line in lines:
@@ -485,13 +505,13 @@ class LogParser:
             m = self.RE_FW_VERSION.search(line)
             if m:
                 mcu_no, version = m.group(1), m.group(2).strip()
-                if mcu_no == "1" and not info.mcu1_version:
+                if mcu_no == "0" and version.startswith("0S") and not info.mcu0_version:
+                    info.mcu0_version = version
+                elif mcu_no == "1" and version.startswith("1S") and not info.mcu1_version:
                     info.mcu1_version = version
-                elif mcu_no == "2" and not info.mcu2_version:
+                elif mcu_no == "2" and version.startswith("2S") and not info.mcu2_version:
                     info.mcu2_version = version
-                elif mcu_no == "3" and not info.mcu3_version:
-                    info.mcu3_version = version
-                elif mcu_no == "5" and not info.temp_control_version:
+                elif mcu_no == "4" and version.startswith("5T") and not info.temp_control_version:
                     info.temp_control_version = version
 
         self.instrument_info = info
@@ -545,22 +565,106 @@ class LogParser:
 
     def _parse_user_actions(self, lines: list[str]):
         pending_project = None
+        current_self_check = None
 
-        for line in lines:
+        def mark_lines(*line_numbers: int) -> list[int]:
+            result = []
+            for line_no in line_numbers:
+                if line_no and line_no not in result:
+                    result.append(line_no)
+            return result
+
+        def finalize_self_check():
+            nonlocal current_self_check
+            if not current_self_check:
+                return
+            detail = "自检异常" if current_self_check["failed"] else "自检完成"
+            self.user_actions.append(UserActionRecord(
+                action_time=current_self_check["time"],
+                action_type="仪器自检",
+                detail=detail,
+                source_line=current_self_check["source_line"],
+                related_lines=current_self_check["related_lines"],
+            ))
+            current_self_check = None
+
+        def find_next_barcode(start_idx: int) -> tuple[int, str]:
+            for j in range(start_idx + 1, min(len(lines), start_idx + 12)):
+                if j != start_idx and self.RE_DILUENT_SCAN.search(lines[j]):
+                    break
+                if "条码内容" in lines[j]:
+                    m = self.RE_BARCODE_CONTENT.search(lines[j])
+                    content = (m.group(1) if m else "").strip()
+                    content = content.replace("\\r", "").replace("\r", "").strip()
+                    return j, content
+            return -1, ""
+
+        def find_next_line(start_idx: int, pattern: str, limit: int = 40) -> int:
+            for j in range(start_idx + 1, min(len(lines), start_idx + limit)):
+                if pattern in lines[j]:
+                    return j
+            return -1
+
+        for idx, line in enumerate(lines):
             time_str = self._extract_time_prefix(line)
+            source_line = idx + 1
+
+            if "system starting" in line:
+                user = ""
+                related = [source_line]
+                for j in range(idx + 1, min(len(lines), idx + 20)):
+                    login_match = self.RE_USER_LOGIN.search(lines[j])
+                    if login_match:
+                        user = login_match.group(1).strip()
+                        related.append(j + 1)
+                        break
+                detail = f"用户登录：{user}" if user else "用户登录：未找到"
+                self.user_actions.append(UserActionRecord(
+                    action_time=time_str,
+                    action_type="仪器开机",
+                    detail=detail,
+                    source_line=source_line,
+                    related_lines=related,
+                ))
+                continue
+
+            self_check_match = self.RE_SELF_CHECK.search(line)
+            if self_check_match:
+                mcu_no = self_check_match.group(2)
+                if mcu_no == "3":
+                    finalize_self_check()
+                    current_self_check = {
+                        "time": self_check_match.group(1).split(".", 1)[0],
+                        "failed": False,
+                        "source_line": source_line,
+                        "related_lines": [source_line],
+                    }
+                elif current_self_check:
+                    current_self_check["related_lines"].append(source_line)
+                    if mcu_no == "1":
+                        finalize_self_check()
+                continue
+
+            if current_self_check and ("自检错误" in line or self.RE_SELF_CHECK_FAIL.search(line)):
+                current_self_check["failed"] = True
+                current_self_check["related_lines"].append(source_line)
+                continue
 
             sample_match = self.RE_SAMPLE.search(line)
             if sample_match:
                 serial = sample_match.group(2)
                 sample = self.samples.get(serial)
-                rack_display = self._plus_one_rack_pos(sample_match.group(3))
-                item_text = sample.test_items[0] if sample and sample.test_items else ""
-                detail = f"项目：{item_text}。样本ID:{sample_match.group(4)}"
+                raw_rack = sample_match.group(3)
+                rack_display = self._plus_one_rack_pos(raw_rack)
+                item_text = "、".join(sample.test_items) if sample and sample.test_items else ""
+                detail = f"编号{serial}。项目：{item_text}。样本ID:{sample_match.group(4)}"
                 self.user_actions.append(UserActionRecord(
                     action_time=time_str,
-                    action_type=f"样本架{rack_display}编排",
+                    action_type="急诊位编排" if raw_rack == "6-0" else f"样本架{rack_display}编排",
                     detail=detail,
                     sample_serial=serial,
+                    source_line=source_line,
+                    related_lines=[source_line],
                 ))
                 continue
 
@@ -597,8 +701,48 @@ class LogParser:
                     action_time=time_str,
                     action_type=f"装载弹夹{slot_display}" if slot_display else "装载弹夹",
                     detail=detail,
+                    source_line=source_line,
+                    related_lines=[source_line],
                 ))
                 pending_project = None
+                continue
+
+            diluent_match = self.RE_DILUENT_SCAN.search(line)
+            if diluent_match:
+                slot = int(diluent_match.group(1)) + 1
+                barcode_idx, barcode = find_next_barcode(idx)
+                related = mark_lines(source_line, barcode_idx + 1 if barcode_idx >= 0 else 0)
+                if barcode and "," in barcode:
+                    parts = [part.strip() for part in barcode.split(",")]
+                    if len(parts) >= 2 and parts[0] and parts[1]:
+                        detail = f"稀释液仓{slot}：稀释液号{parts[0]} 项目{parts[1]}"
+                    else:
+                        detail = f"稀释液仓{slot}：空"
+                else:
+                    detail = f"稀释液仓{slot}：空"
+                self.user_actions.append(UserActionRecord(
+                    action_time=time_str,
+                    action_type=f"稀释液仓{slot}装载",
+                    detail=detail,
+                    source_line=source_line,
+                    related_lines=related,
+                ))
+                continue
+
+            if "耗材盒弹出" in line and "耗材盒弹出完成" not in line:
+                finish_idx = find_next_line(idx, "耗材盒弹出完成")
+                finish_time = self._extract_time_prefix(lines[finish_idx]) if finish_idx >= 0 else ""
+                related = mark_lines(source_line, finish_idx + 1 if finish_idx >= 0 else 0)
+                self.user_actions.append(UserActionRecord(
+                    action_time=time_str,
+                    action_type="耗材更换",
+                    detail=f"耗材盒弹出完成时间：{finish_time or '未找到'}",
+                    source_line=source_line,
+                    related_lines=related,
+                ))
+                continue
+
+        finalize_self_check()
 
     def _update_sample_status(self, lines: list[str]):
         # 第一阶段：通过 F07.3.3 Finish + 测试完成结果行配对，提取完成数据
@@ -629,10 +773,17 @@ class LogParser:
                 if serial_to_update and serial_to_update in self.samples:
                     s = self.samples[serial_to_update]
                     s.status = "测试完成"
-                    s.finish_time = self._extract_time_prefix(line)
+                    finish_time = self._extract_time_prefix(line)
+                    s.finish_time = finish_time
                     s.project_abbr = project_abbr
                     s.concentration = concentration
                     s.measure_value = measure_value
+                    s.test_results.append({
+                        'project_abbr': project_abbr,
+                        'concentration': concentration,
+                        'measure_value': measure_value,
+                        'finish_time': finish_time,
+                    })
                 pending_serial = None
 
         # 第二阶段：未完成的样本，检查是否有对应报警
@@ -642,38 +793,10 @@ class LogParser:
                     sample.status = "异常"
 
     def _check_action_completeness(self):
-        """以样本0001的一级动作编号顺序为标准流程，标记动作不全的其他样本。
-        若该样本的模式已有持久化标准序列，则自动更新；否则以标准序列为准对比。
-        """
-        ref_serial = "0001"
-
-        # 从样本0001提取本次日志的有序去重一级动作序列，并自动学习该模式的标准
-        if ref_serial in self.actions and ref_serial in self.samples:
-            seen: set[str] = set()
-            sequence: list[str] = []
-            for a in self.actions[ref_serial]:
-                if a.level1 not in seen:
-                    seen.add(a.level1)
-                    sequence.append(a.level1)
-            self.standard_action_sequence = sequence  # 兼容旧引用
-
-            ref_mode = self.samples[ref_serial].mode  # e.g. "两孔稀释"
-            if ref_mode and ref_mode not in self.standard_sequences:
-                # 首次见到该模式，自动学习并写入（调用方负责持久化）
-                self.standard_sequences[ref_mode] = sequence
-
-        # 按每个样本的测试模式匹配对应的标准序列进行对比
-        for serial, sample in self.samples.items():
-            if serial == ref_serial:
-                continue
-            mode_standard = self.standard_sequences.get(sample.mode, [])
-            if not mode_standard:
-                continue
-            sample_l1_set = {a.level1 for a in self.actions.get(serial, [])}
-            missing = [code for code in mode_standard if code not in sample_l1_set]
-            sample.missing_actions = missing
-            if missing:
-                sample.status = "异常"
+        """标准流程功能已移除，不再根据缺失动作改变样本状态。"""
+        self.standard_action_sequence = []
+        for sample in self.samples.values():
+            sample.missing_actions = []
 
     def _parse_sample(self, line: str):
         m = self.RE_SAMPLE.search(line)
@@ -702,7 +825,7 @@ class LogParser:
         l2_clean = re.sub(r'[#()]|\(\d+\)', '', level2_raw).rstrip('.')
         return f"{sample_num}{mode_char}{level1}.{l2_clean}"
 
-    def _parse_start(self, line: str):
+    def _parse_start(self, line: str, source_line: int = 0):
         m = self.RE_START.search(line)
         adp = False
         if not m:
@@ -736,6 +859,7 @@ class LogParser:
             start_pos=start_pos,
             end_pos=end_pos,
             start_time=timestamp,
+            source_line=source_line,
         )
 
         key = self._make_action_key(sample_num, mode_char, level1, level2_raw)
@@ -788,20 +912,30 @@ class LogParser:
             act.actual_raster = int(m.group(8))
             act.raster_deviation = int(m.group(9))
 
-    def _parse_alarm(self, line: str, seen: set):
+    def _parse_alarm(self, line: str, seen: set, source_line: int = 0):
         m = self.RE_ALARM.search(line)
         if not m:
             return
         time_str = m.group(1)
-        error_code = m.group(2)
-        sample_num_raw = m.group(3)
-        mode_char = m.group(4)
-        action_code = m.group(5)
-        content = m.group(6)
-        detail = m.group(7)
+        raw_code = m.group(2)
+        content = m.group(3)
+        reason = m.group(4)
+        detail = m.group(5)
+        code_match = re.match(
+            r'([A-Z]+-[A-Z]+-\d+)(?:-(\d{4,5})([A-Z])?([A-Z]\d{2})?)?',
+            raw_code
+        )
+        if code_match:
+            error_code = code_match.group(1)
+            sample_num_raw = code_match.group(2)
+            action_code = code_match.group(4)
+        else:
+            error_code = raw_code.split("@", 1)[0]
+            sample_num_raw = ""
+            action_code = ""
 
         # 去重：只去除同一秒内完全相同的重复条目（日志可能连续打印两次同一行）
-        dedup_key = f"{time_str}-{error_code}-{sample_num_raw}-{action_code}"
+        dedup_key = f"{time_str}-{raw_code}-{content}-{reason}-{detail}"
         if dedup_key in seen:
             return
         seen.add(dedup_key)
@@ -813,10 +947,12 @@ class LogParser:
         alarm = Alarm(
             time_str=time_str,
             error_code=error_code,
+            display_code=raw_code,
             sample_num=sample_serial,
             action_code=action_code,
             content=content,
-            detail=detail,
+            detail="；".join(part for part in (content, reason, detail) if part),
+            source_line=source_line,
         )
         self.alarms.append(alarm)
 
@@ -980,7 +1116,7 @@ class TimelineCanvas(tk.Frame):
             label = aliases.get(comp, comp)
             self.label_canvas.create_text(
                 self.LABEL_WIDTH - 5, y, text=label, anchor="e",
-                font=("Microsoft YaHei", 8), fill=C_TEXT)
+                font=("Microsoft YaHei", 9), fill=C_TEXT)
             # 水平基线
             base_y = self.TIME_HEADER + i * self.ROW_HEIGHT + self.ROW_HEIGHT - 4
             self.canvas.create_line(0, base_y, total_w, base_y,
@@ -1086,7 +1222,7 @@ class TimelineCanvas(tk.Frame):
                 # 显示 HH:MM:SS
                 short_label = label[:8]
                 self.canvas.create_text(x, self.TIME_HEADER - 7, text=short_label,
-                                        anchor="s", font=("Consolas", 7),
+                                        anchor="s", font=("Consolas", 8),
                                         fill=C_TEXT2, tags="axis")
             t += interval_ms
 
@@ -1152,19 +1288,20 @@ class TimelineCanvas(tk.Frame):
 
 class TableView(tk.Frame):
     FIXED_COLS = ["动作编号", "动作名称", "二级动作", "运动部件"]
-    OPTIONAL_COLS = ["动作坐标", "起始时间", "结束时间", "动作时间(ms)",
+    OPTIONAL_COLS = ["动作时间(ms)", "起始时间", "结束时间", "动作坐标",
                      "理论光栅", "实际光栅", "光栅偏差"]
 
     def __init__(self, parent, app):
         super().__init__(parent, bg=C_CARD)
         self.app = app
         self.col_vars = {}
-        self._collapse_var = tk.BooleanVar(value=False)
+        self._collapse_var = tk.BooleanVar(value=True)
+        self._action_item_map = {}
 
         # 列显示/隐藏 控制栏
         ctrl_frame = tk.Frame(self, bg=C_BG2)
         ctrl_frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
-        tk.Label(ctrl_frame, text="显示列:", font=("Microsoft YaHei", 8),
+        tk.Label(ctrl_frame, text="显示列:", font=("Microsoft YaHei", 9),
                  bg=C_BG2, fg=C_TEXT2).pack(side=tk.LEFT, padx=4)
 
         for col in self.OPTIONAL_COLS:
@@ -1196,6 +1333,7 @@ class TableView(tk.Frame):
 
         # 禁止用户拖拽调整列宽
         self.tree.bind("<Button-1>", self._block_col_resize)
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         self._rebuild_columns()
 
@@ -1203,9 +1341,21 @@ class TableView(tk.Frame):
         if self.tree.identify_region(event.x, event.y) == "separator":
             return "break"
 
+    def _on_tree_right_click(self, event):
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        act = self._action_item_map.get(item)
+        if not act or not act.source_line:
+            return
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="查看日志原文",
+                         command=lambda: self.app._jump_to_action_raw_line(act))
+        menu.tk_popup(event.x_root, event.y_root)
+
     def _auto_resize_columns(self):
         import tkinter.font as tkfont
-        font = tkfont.Font(font=("Microsoft YaHei", 9))
+        font = tkfont.Font(font=("Microsoft YaHei", 10))
         cols = self._get_visible_cols()
         widths = {col: font.measure(col) + 24 for col in cols}
         for iid in self.tree.get_children():
@@ -1255,12 +1405,11 @@ class TableView(tk.Frame):
         self._actions = actions
         self._alarms = alarms
         self._theory_times = theory_times
-        self._standard_sequence = standard_sequence or []
-        self._missing_actions = set(missing_actions) if missing_actions else set()
         self._repopulate()
 
     def _repopulate(self):
         self.tree.delete(*self.tree.get_children())
+        self._action_item_map = {}
         if not hasattr(self, '_actions'):
             return
 
@@ -1269,10 +1418,6 @@ class TableView(tk.Frame):
 
         # ── 按时间顺序构建执行批次 ──
         batches = self._build_ordered_batches(self._actions)
-        batch_map: dict[str, list] = {lv1: grp for lv1, grp in batches}
-        # 已插入的level1集合，用于识别标准流程之外的额外动作
-        inserted_l1: set[str] = set()
-
         def _insert_batch(level1, group):
             """插入一个动作批次的父行和所有子行。"""
             starts = [time_to_ms(a.start_time) for a in group if a.start_time]
@@ -1317,6 +1462,10 @@ class TableView(tk.Frame):
             parent_tag = "timeout_summary" if (timeout is not None and timeout > 0) else "summary"
             pid = self.tree.insert("", tk.END, values=parent_row,
                                    tags=(parent_tag,), open=not self._collapse_var.get())
+            # 一级行映射到组内第一个有行号的 Action（右键跳转用）
+            first_act = next((a for a in group if a.source_line), None)
+            if first_act:
+                self._action_item_map[pid] = first_act
 
             for act in group:
                 t_start = time_to_ms(act.start_time) if act.start_time else 0
@@ -1350,6 +1499,7 @@ class TableView(tk.Frame):
                         child_row.append("")
 
                 ciid = self.tree.insert(pid, tk.END, values=child_row)
+                self._action_item_map[ciid] = act
                 tags = []
                 if act.level1 in alarm_actions:
                     tags.append("alarm")
@@ -1358,40 +1508,10 @@ class TableView(tk.Frame):
                 if tags:
                     self.tree.item(ciid, tags=tuple(tags))
 
-        def _insert_missing_row(level1):
-            """插入一个占位红色行，表示该动作在标准流程中存在但本样本缺失。"""
-            level1_name = (self.app.parser.theory_display_names.get(level1)
-                           or self.app.parser.theory_names.get(level1, ""))
-            missing_row = []
-            for col in cols:
-                if col == "动作编号":
-                    missing_row.append(level1)
-                elif col == "动作名称":
-                    missing_row.append(level1_name)
-                elif col == "二级动作":
-                    missing_row.append("【缺失】")
-                else:
-                    missing_row.append("")
-            self.tree.insert("", tk.END, values=missing_row, tags=("missing_action",))
+        for level1, group in batches:
+            _insert_batch(level1, group)
 
-        # ── 按标准流程顺序插入：有则显示，缺则插红色占位行 ──
-        if self._standard_sequence:
-            for level1 in self._standard_sequence:
-                if level1 in batch_map:
-                    _insert_batch(level1, batch_map[level1])
-                elif level1 in self._missing_actions:
-                    _insert_missing_row(level1)
-                inserted_l1.add(level1)
-            # 插入不在标准流程中的额外动作批次（按原始顺序）
-            for level1, group in batches:
-                if level1 not in inserted_l1:
-                    _insert_batch(level1, group)
-        else:
-            # 无标准流程时按原始时间顺序插入
-            for level1, group in batches:
-                _insert_batch(level1, group)
-
-        _bold = ("Microsoft YaHei", 9, "bold")
+        _bold = ("Microsoft YaHei", 10, "bold")
         self.tree.tag_configure("alarm", background=C_RED_LIGHT)
         self.tree.tag_configure("high_dev", foreground=C_RED)
         self.tree.tag_configure("summary",
@@ -1399,9 +1519,6 @@ class TableView(tk.Frame):
         # 超时：仅改橙色文字，行背景保持蓝色，与缺失行的整行红色区分
         self.tree.tag_configure("timeout_summary",
                                 background="#c8dcfa", foreground="#cc6600", font=_bold)
-        # 缺失动作：整行红色背景，醒目提示
-        self.tree.tag_configure("missing_action",
-                                background="#ffd6d6", foreground=C_RED, font=_bold)
         self._auto_resize_columns()
 
     @staticmethod
@@ -1633,7 +1750,7 @@ class MotorNamesDialog(tk.Toplevel):
         self.configure(bg=C_BG)
 
         tk.Label(self, text="双击「显示名称」列可修改，留空则使用原始名称",
-                 bg=C_BG, fg=C_TEXT2, font=("Microsoft YaHei", 8)
+                 bg=C_BG, fg=C_TEXT2, font=("Microsoft YaHei", 9)
                  ).pack(anchor="w", padx=12, pady=(8, 2))
 
         # 编辑表格
@@ -1726,9 +1843,11 @@ class ParamsView(tk.Frame):
         "Version_MCU4","Version_MCU5","Version_Needle","Version_test",
     ]
 
-    def __init__(self, parent, app_dir: str):
+    def __init__(self, parent, app_dir: str, on_file_loaded=None):
         super().__init__(parent, bg=C_CARD)
         self.app_dir = app_dir
+        self.on_file_loaded = on_file_loaded
+        self._syncing = False
         self.data = [None, None]          # 两份参数 dict
         self.file_names = ["", ""]
         self.diff_only = tk.BooleanVar(value=False)
@@ -1754,7 +1873,7 @@ class ParamsView(tk.Frame):
                   bg=C_BLUE, fg=C_WHITE, relief="flat", padx=10
                   ).pack(side=tk.LEFT, padx=(0, 4))
         self._lbl1 = tk.Label(top, text="（未载入）", bg=C_BG2, fg=C_TEXT2,
-                              font=("Microsoft YaHei", 8))
+                              font=("Microsoft YaHei", 9))
         self._lbl1.pack(side=tk.LEFT, padx=(0, 14))
 
         # 参数2
@@ -1762,7 +1881,7 @@ class ParamsView(tk.Frame):
                   bg=C_BLUE, fg=C_WHITE, relief="flat", padx=10
                   ).pack(side=tk.LEFT, padx=(0, 4))
         self._lbl2 = tk.Label(top, text="（未载入）", bg=C_BG2, fg=C_TEXT2,
-                              font=("Microsoft YaHei", 8))
+                              font=("Microsoft YaHei", 9))
         self._lbl2.pack(side=tk.LEFT, padx=(0, 14))
 
         # 仅显示差异 + 差异计数
@@ -1770,19 +1889,19 @@ class ParamsView(tk.Frame):
         ttk.Checkbutton(top, text="仅显示差异", variable=self.diff_only,
                         command=self._apply_filter).pack(side=tk.LEFT)
         self._diff_lbl = tk.Label(top, text="差异数：—", bg=C_BG2, fg=C_TEXT2,
-                                  font=("Microsoft YaHei", 8))
+                                  font=("Microsoft YaHei", 9))
         self._diff_lbl.pack(side=tk.LEFT, padx=8)
 
         # 搜索栏
         ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
         tk.Label(top, text="搜索:", bg=C_BG2, fg=C_TEXT2,
-                 font=("Microsoft YaHei", 8)).pack(side=tk.LEFT)
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
         search_entry = ttk.Entry(top, textvariable=self._search_var, width=18)
         search_entry.pack(side=tk.LEFT, padx=(4, 2))
         search_entry.bind("<Return>", lambda e: self._do_search())
         self._search_var.trace("w", lambda *a: self._do_search())
         tk.Button(top, text="✕", command=self._clear_search,
-                  bg=C_BG2, fg=C_TEXT2, relief="flat", font=("Microsoft YaHei", 8),
+                  bg=C_BG2, fg=C_TEXT2, relief="flat", font=("Microsoft YaHei", 9),
                   cursor="hand2", padx=2).pack(side=tk.LEFT)
 
         # Treeview
@@ -1814,9 +1933,9 @@ class ParamsView(tk.Frame):
         self.tree.tag_configure("diff",   background="#ffd6d6")
         self.tree.tag_configure("missing", background="#fff3cd")
         self.tree.tag_configure("group",   background="#eef2fa",
-                                font=("Microsoft YaHei", 9, "bold"))
+                                font=("Microsoft YaHei", 10, "bold"))
         self.tree.tag_configure("group_diff", background="#ffe8e8",
-                                font=("Microsoft YaHei", 9, "bold"))
+                                font=("Microsoft YaHei", 10, "bold"))
 
         self.tree.bind("<Double-1>", self._on_double_click)
 
@@ -1835,6 +1954,22 @@ class ParamsView(tk.Frame):
         self.file_names[idx] = name
         [self._lbl1, self._lbl2][idx].config(text=name)
         self._populate()
+        if self.on_file_loaded and not self._syncing:
+            self.on_file_loaded(self, idx, self.data[idx], name)
+
+    def set_shared_data(self, data, file_names):
+        """同步另一参数视图已载入的数据。"""
+        self._syncing = True
+        try:
+            self.data = data
+            self.file_names = file_names
+            self._lbl1.config(text=file_names[0] or "（未载入）")
+            self._lbl2.config(text=file_names[1] or "（未载入）")
+            self._load_action_names()
+            self._load_param_notes()
+            self._populate()
+        finally:
+            self._syncing = False
 
     # ── 树填充 ───────────────────────────────────────────────────────────────
 
@@ -1863,7 +1998,154 @@ class ParamsView(tk.Frame):
             return round(float(v1), 6) != round(float(v2), 6)
         return str(v1) != str(v2)
 
-    def _insert_group(self, parent, label: str, open_: bool = True) -> str:
+    def _make_param_item(self, label: str, v1, v2) -> dict:
+        return {
+            "label": label,
+            "v1": v1,
+            "v2": v2,
+            "s1": self._fmt(v1),
+            "s2": self._fmt(v2),
+            "diff": (v1 is None or v2 is None or self._is_diff(v1, v2)),
+            "note": self._param_notes.get(label, ""),
+        }
+
+    def _value_param_items(self, v1, v2, preferred_labels=None, prefix: str = "") -> list[dict]:
+        if isinstance(v1 or v2, dict):
+            sub1, sub2 = (v1 or {}), (v2 or {})
+            items = []
+            for k in self._merged_keys(sub1, sub2):
+                label = f"{prefix}{k}" if prefix else k
+                items.append(self._make_param_item(label, sub1.get(k), sub2.get(k)))
+            return items
+
+        if isinstance(v1 or v2, list):
+            arr1 = v1 if isinstance(v1, list) else []
+            arr2 = v2 if isinstance(v2, list) else []
+            n = max(len(arr1), len(arr2), len(preferred_labels or []))
+            items = []
+            for i in range(n):
+                base_label = preferred_labels[i] if preferred_labels and i < len(preferred_labels) else f"参数{i + 1}"
+                label = f"{prefix}{base_label}" if prefix else base_label
+                e1 = arr1[i] if i < len(arr1) else None
+                e2 = arr2[i] if i < len(arr2) else None
+                items.append(self._make_param_item(label, e1, e2))
+            return items
+
+        return [self._make_param_item(prefix or "值", v1, v2)]
+
+    def _build_param_sections(self) -> list[dict]:
+        """生成整机参数的统一展示模型，供树形视图和表格视图复用。"""
+        d1 = self.data[0] or {}
+        d2 = self.data[1] or {}
+        all_keys = list(dict.fromkeys(list(d1.keys()) + list(d2.keys())))
+        motor_keys = [
+            k for k in all_keys
+            if isinstance(d1.get(k) or d2.get(k), dict)
+            and "动作参数" in (d1.get(k) or d2.get(k) or {})
+            and k not in ("ADP",)
+        ]
+        detection_mainboard_keys = ("动态算法", "放大倍数", "曲线翻转")
+        sections: list[dict] = []
+
+        system_items = [
+            self._make_param_item(k, d1.get(k), d2.get(k))
+            for k in self.SYSTEM_KEYS
+            if k in all_keys
+        ]
+        sections.append({"title": "系统信息", "grouped": False, "items": system_items})
+
+        adp1 = (d1.get("ADP") or {}).get("动作参数", [])
+        adp2 = (d2.get("ADP") or {}).get("动作参数", [])
+        adp_items = []
+        for i in range(max(len(adp1), len(adp2))):
+            key = f"ADP_{i}"
+            named = key in self._action_names
+            v1 = adp1[i] if i < len(adp1) else None
+            v2 = adp2[i] if i < len(adp2) else None
+            if not named and (v1 or 0) == 0 and (v2 or 0) == 0:
+                continue
+            adp_items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2))
+        sections.append({"title": "加样器参数", "grouped": False, "items": adp_items})
+
+        motor_groups = []
+        for mkey in motor_keys:
+            m1, m2 = (d1.get(mkey) or {}), (d2.get(mkey) or {})
+            items = [
+                self._make_param_item(k, m1.get(k), m2.get(k))
+                for k in self._merged_keys(m1, m2)
+                if k != "动作参数"
+            ]
+            motor_groups.append({"title": mkey, "items": items})
+        sections.append({"title": "电机参数", "grouped": True, "groups": motor_groups})
+
+        coord_groups = []
+        coord1, coord2 = (d1.get("坐标") or {}), (d2.get("坐标") or {})
+        if coord1 or coord2:
+            coord_items = []
+            for pt in self._merged_keys(coord1, coord2):
+                xyz1 = coord1.get(pt, [None, None, None])
+                xyz2 = coord2.get(pt, [None, None, None])
+                for i, axis in enumerate(["X", "Y", "Z"]):
+                    v1 = xyz1[i] if xyz1 and i < len(xyz1) else None
+                    v2 = xyz2[i] if xyz2 and i < len(xyz2) else None
+                    coord_items.append(self._make_param_item(f"{pt}  {axis}", v1, v2))
+            coord_groups.append({"title": "坐标定位点", "items": coord_items})
+        for mkey in motor_keys:
+            m1, m2 = (d1.get(mkey) or {}), (d2.get(mkey) or {})
+            arr1, arr2 = m1.get("动作参数", []), m2.get("动作参数", [])
+            items = []
+            for i in range(max(len(arr1), len(arr2), 20)):
+                key = f"{mkey}_{i}"
+                named = key in self._action_names
+                v1 = arr1[i] if i < len(arr1) else None
+                v2 = arr2[i] if i < len(arr2) else None
+                if not named and (v1 or 0) == 0 and (v2 or 0) == 0:
+                    continue
+                items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2))
+            coord_groups.append({"title": f"{mkey}  动作参数", "items": items})
+        sections.append({"title": "坐标参数", "grouped": True, "groups": coord_groups})
+
+        temp_groups = []
+        for k in [k for k in all_keys if "温控" in k]:
+            tc1, tc2 = (d1.get(k) or {}), (d2.get(k) or {})
+            temp_groups.append({
+                "title": k,
+                "items": [self._make_param_item(fk, tc1.get(fk), tc2.get(fk)) for fk in self._merged_keys(tc1, tc2)]
+            })
+        sections.append({"title": "温控参数", "grouped": True, "groups": temp_groups})
+
+        sample_groups = []
+        sample_key = next((k for k in ("样本容器", "管径参数") if k in all_keys), None)
+        if sample_key:
+            sc1, sc2 = (d1.get(sample_key) or {}), (d2.get(sample_key) or {})
+            for i in range(1, 10):
+                tube = f"tube{i}"
+                if tube in sc1 or tube in sc2:
+                    sample_groups.append({
+                        "title": tube,
+                        "items": self._value_param_items(sc1.get(tube), sc2.get(tube),
+                                                         ["参数1", "参数2", "参数3", "参数4"])
+                    })
+        sections.append({"title": "样本容器", "grouped": True, "groups": sample_groups})
+
+        detection_items = []
+        channel_key = next((k for k in ("检测参数", "通道参数") if k in all_keys), None)
+        ch1, ch2 = (d1.get(channel_key) or {}) if channel_key else {}, (d2.get(channel_key) or {}) if channel_key else {}
+        for sk in self._merged_keys(ch1, ch2):
+            sv1, sv2 = ch1.get(sk), ch2.get(sk)
+            if isinstance(sv1 or sv2, (dict, list)):
+                detection_items.extend(self._value_param_items(sv1, sv2, prefix=f"{sk} "))
+            else:
+                detection_items.append(self._make_param_item(sk, sv1, sv2))
+        mb1, mb2 = d1.get("主板参数", {}), d2.get("主板参数", {})
+        for k in detection_mainboard_keys:
+            if k in mb1 or k in mb2:
+                detection_items.append(self._make_param_item(k, mb1.get(k), mb2.get(k)))
+        sections.append({"title": "检测参数", "grouped": False, "items": detection_items})
+
+        return sections
+
+    def _insert_group(self, parent, label: str, open_: bool = False) -> str:
         return self.tree.insert(parent, tk.END, text=label, values=("", ""),
                                 tags=("group",), open=open_)
 
@@ -1886,6 +2168,38 @@ class ParamsView(tk.Frame):
         if has_diff:
             self.tree.item(gid, tags=("group_diff",))
 
+    def _merged_keys(self, d1: dict, d2: dict):
+        return dict.fromkeys(list(d1.keys()) + list(d2.keys()))
+
+    def _insert_dict_group(self, parent: str, label: str, d1: dict, d2: dict) -> bool:
+        g = self._insert_group(parent, label)
+        g_diff = False
+        for k in self._merged_keys(d1, d2):
+            g_diff |= self._insert_leaf(g, k, d1.get(k), d2.get(k))
+        self._mark_group_diff(g, g_diff)
+        return g_diff
+
+    def _insert_value_children(self, parent: str, v1, v2, preferred_labels=None) -> bool:
+        has_diff = False
+        if isinstance(v1 or v2, dict):
+            sub1, sub2 = (v1 or {}), (v2 or {})
+            for k in self._merged_keys(sub1, sub2):
+                has_diff |= self._insert_leaf(parent, k, sub1.get(k), sub2.get(k))
+            return has_diff
+
+        if isinstance(v1 or v2, list):
+            arr1 = v1 if isinstance(v1, list) else []
+            arr2 = v2 if isinstance(v2, list) else []
+            n = max(len(arr1), len(arr2), len(preferred_labels or []))
+            for i in range(n):
+                label = preferred_labels[i] if preferred_labels and i < len(preferred_labels) else f"参数{i + 1}"
+                e1 = arr1[i] if i < len(arr1) else None
+                e2 = arr2[i] if i < len(arr2) else None
+                has_diff |= self._insert_leaf(parent, label, e1, e2)
+            return has_diff
+
+        return self._insert_leaf(parent, "值", v1, v2)
+
     def _populate(self):
         self._reattach_all()                        # 先还原所有 detach 的节点
         self.tree.delete(*self.tree.get_children())
@@ -1904,6 +2218,8 @@ class ParamsView(tk.Frame):
             and k not in ("ADP",)
         ]
 
+        detection_mainboard_keys = ("动态算法", "放大倍数", "曲线翻转")
+
         # ── 1. 系统信息 ──────────────────────────────────────────────────
         g = self._insert_group("", "系统信息")
         g_diff = False
@@ -1913,20 +2229,11 @@ class ParamsView(tk.Frame):
         self._mark_group_diff(g, g_diff)
         self._diff_count += sum(1 for _, d in self._leaf_iids[-len(self.SYSTEM_KEYS):] if d)
 
-        # ── 2. 主板参数 ──────────────────────────────────────────────────
-        mb1, mb2 = d1.get("主板参数", {}), d2.get("主板参数", {})
-        if mb1 or mb2:
-            g = self._insert_group("", "主板参数")
-            g_diff = False
-            for k in dict.fromkeys(list(mb1.keys()) + list(mb2.keys())):
-                g_diff |= self._insert_leaf(g, k, mb1.get(k), mb2.get(k))
-            self._mark_group_diff(g, g_diff)
-
-        # ── 3. ADP参数 ───────────────────────────────────────────────────
+        # ── 2. 加样器参数 ────────────────────────────────────────────────
         adp1 = (d1.get("ADP") or {}).get("动作参数", [])
         adp2 = (d2.get("ADP") or {}).get("动作参数", [])
         if adp1 or adp2:
-            g = self._insert_group("", "ADP参数")
+            g = self._insert_group("", "加样器参数")
             g_diff = False
             n = max(len(adp1), len(adp2))
             for i in range(n):
@@ -1941,7 +2248,7 @@ class ParamsView(tk.Frame):
                 g_diff |= self._insert_leaf(g, name, v1, v2)
             self._mark_group_diff(g, g_diff)
 
-        # ── 4. 电机参数组（除动作参数）────────────────────────────────────
+        # ── 3. 电机参数组（除动作参数）────────────────────────────────────
         g_motor = self._insert_group("", "电机参数")
         g_motor_diff = False
         for mkey in motor_keys:
@@ -1956,8 +2263,8 @@ class ParamsView(tk.Frame):
             g_motor_diff |= mg_diff
         self._mark_group_diff(g_motor, g_motor_diff)
 
-        # ── 5. 坐标（坐标定位点 + 各电机动作参数）────────────────────────
-        g_coord = self._insert_group("", "坐标")
+        # ── 4. 坐标参数（坐标定位点 + 各电机动作参数）────────────────────
+        g_coord = self._insert_group("", "坐标参数")
         g_coord_diff = False
 
         # 5a. 坐标定位点
@@ -1998,7 +2305,7 @@ class ParamsView(tk.Frame):
             g_coord_diff |= mg_diff
         self._mark_group_diff(g_coord, g_coord_diff)
 
-        # ── 6. 温控参数 ──────────────────────────────────────────────────
+        # ── 5. 温控参数 ──────────────────────────────────────────────────
         tc_keys = [k for k in all_keys if "温控" in k]
         if tc_keys:
             g_tc = self._insert_group("", "温控参数")
@@ -2013,8 +2320,52 @@ class ParamsView(tk.Frame):
                 g_tc_diff |= tg_diff
             self._mark_group_diff(g_tc, g_tc_diff)
 
-        # ── 其他顶层 key（通道参数、管径参数等）────────────────────────────
-        handled = set(self.SYSTEM_KEYS) | {"主板参数", "ADP", "坐标"} | set(motor_keys) | set(tc_keys)
+        # ── 6. 样本容器（tube1-tube9）───────────────────────────────────
+        sample_key = next((k for k in ("样本容器", "管径参数") if k in all_keys), None)
+        if sample_key:
+            sc1, sc2 = (d1.get(sample_key) or {}), (d2.get(sample_key) or {})
+            g_sample = self._insert_group("", "样本容器")
+            g_sample_diff = False
+            for i in range(1, 10):
+                tube = f"tube{i}"
+                if tube not in sc1 and tube not in sc2:
+                    continue
+                tg = self._insert_group(g_sample, tube)
+                tg_diff = self._insert_value_children(tg, sc1.get(tube), sc2.get(tube),
+                                                      ["参数1", "参数2", "参数3", "参数4"])
+                self._mark_group_diff(tg, tg_diff)
+                g_sample_diff |= tg_diff
+            self._mark_group_diff(g_sample, g_sample_diff)
+
+        # ── 7. 检测参数（原通道参数 + 主板检测项）──────────────────────────
+        channel_key = next((k for k in ("检测参数", "通道参数") if k in all_keys), None)
+        ch1, ch2 = (d1.get(channel_key) or {}) if channel_key else {}, (d2.get(channel_key) or {}) if channel_key else {}
+        mb1, mb2 = d1.get("主板参数", {}), d2.get("主板参数", {})
+        has_detection_from_mb = any(k in mb1 or k in mb2 for k in detection_mainboard_keys)
+        if ch1 or ch2 or has_detection_from_mb:
+            g_detection = self._insert_group("", "检测参数")
+            detection_diff = False
+            if ch1 or ch2:
+                for sk in self._merged_keys(ch1, ch2):
+                    sv1, sv2 = ch1.get(sk), ch2.get(sk)
+                    if isinstance(sv1 or sv2, (dict, list)):
+                        sg = self._insert_group(g_detection, sk)
+                        sg_diff = self._insert_value_children(sg, sv1, sv2)
+                        self._mark_group_diff(sg, sg_diff)
+                        detection_diff |= sg_diff
+                    else:
+                        detection_diff |= self._insert_leaf(g_detection, sk, sv1, sv2)
+            for k in detection_mainboard_keys:
+                if k in mb1 or k in mb2:
+                    detection_diff |= self._insert_leaf(g_detection, k, mb1.get(k), mb2.get(k))
+            self._mark_group_diff(g_detection, detection_diff)
+
+        # ── 其他顶层 key：跳过日志和已归类项，避免生成多余一级列表 ───────
+        handled = (
+            set(self.SYSTEM_KEYS) | {"主板参数", "ADP", "坐标", "日志"} |
+            {"样本容器", "管径参数", "检测参数", "通道参数"} |
+            set(motor_keys) | set(tc_keys)
+        )
         for k in all_keys:
             if k in handled:
                 continue
@@ -2219,6 +2570,381 @@ class ParamsView(tk.Frame):
         self._search_var.set("")
 
 
+class ParamsTableView(ParamsView):
+    """整机参数表格展开视图。"""
+
+    ROW_H = 28
+    TITLE_H = 32
+    GAP_H = 12
+    FIRST_COL_W = 65
+    MIN_TABLE_W = 420
+    MIN_COL_W = 68
+
+    def _build_ui(self):
+        top = tk.Frame(self, bg=C_BG2)
+        top.pack(fill=tk.X, padx=6, pady=4)
+
+        tk.Button(top, text="导入整机参数", command=self._load_machine_params,
+                  bg=C_BLUE, fg=C_WHITE, relief="flat", padx=10
+                  ).pack(side=tk.LEFT, padx=(0, 4))
+        self._lbl1 = tk.Label(top, text="（未载入）", bg=C_BG2, fg=C_TEXT2,
+                              font=("Microsoft YaHei", 9))
+        self._lbl1.pack(side=tk.LEFT, padx=(0, 14))
+
+        self._diff_lbl = tk.Label(top, text="参数数：—", bg=C_BG2, fg=C_TEXT2,
+                                  font=("Microsoft YaHei", 9))
+        self._diff_lbl.pack(side=tk.LEFT, padx=8)
+
+        ttk.Separator(top, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        tk.Label(top, text="搜索:", bg=C_BG2, fg=C_TEXT2,
+                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+        search_entry = ttk.Entry(top, textvariable=self._search_var, width=18)
+        search_entry.pack(side=tk.LEFT, padx=(4, 2))
+        search_entry.bind("<Return>", lambda e: self._do_search())
+        self._search_var.trace("w", lambda *a: self._do_search())
+        tk.Button(top, text="✕", command=self._clear_search,
+                  bg=C_BG2, fg=C_TEXT2, relief="flat", font=("Microsoft YaHei", 9),
+                  cursor="hand2", padx=2).pack(side=tk.LEFT)
+
+        body = tk.Frame(self, bg=C_CARD)
+        body.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+        self.canvas = tk.Canvas(body, bg=C_WHITE, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.canvas.yview)
+        hsb = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        self.canvas.bind("<Configure>", lambda e: self._populate())
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+        self.canvas.bind("<Double-1>", self._on_canvas_double_click)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._drawn_cells = []
+        self._section_cells = []
+        self._expanded_sections = set()
+        self._search_match_key = None
+        self._font_normal = tkfont.Font(family="Microsoft YaHei", size=9)
+        self._font_bold = tkfont.Font(family="Microsoft YaHei", size=9, weight="bold")
+        self._font_title = tkfont.Font(family="Microsoft YaHei", size=10, weight="bold")
+
+    def _load_machine_params(self):
+        path = filedialog.askopenfilename(
+            title="导入整机参数",
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        import json as _json
+        with open(path, encoding="utf-8") as f:
+            self.data[0] = _json.load(f)
+        self.data[1] = None
+        name = os.path.basename(path)
+        self.file_names = [name, ""]
+        self._lbl1.config(text=name)
+        self._expanded_sections.clear()
+        self._populate()
+
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _text(self, x, y, text, width, font=None, fill=C_TEXT, anchor="w"):
+        text = "" if text is None else str(text)
+        return self.canvas.create_text(
+            x, y, text=text, anchor=anchor, fill=fill,
+            font=font or ("Microsoft YaHei", 9)
+        )
+
+    def _draw_cell(self, x, y, w, h, text="", fill=C_WHITE, outline=C_BORDER,
+                   font=None, text_fill=C_TEXT, cell_meta=None):
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline)
+        self._text(x + 8, y + h / 2, text, w - 12, font=font, fill=text_fill)
+        if cell_meta:
+            cell_meta["bbox"] = (x, y, x + w, y + h)
+            self._drawn_cells.append(cell_meta)
+
+    def _item_key(self, item):
+        return (item["label"], item["s1"], item["s2"])
+
+    def _measure_text(self, text, bold=False):
+        font = self._font_bold if bold else self._font_normal
+        return font.measure("" if text is None else str(text))
+
+    def _column_widths(self, items):
+        widths = []
+        for item in items:
+            content_w = max(
+                self._measure_text(item["label"], bold=True),
+                self._measure_text(item["s1"]),
+            ) + 18
+            widths.append(max(self.MIN_COL_W, content_w))
+        return widths
+
+    def _table_width(self, items, table_w):
+        return max(table_w, self.FIRST_COL_W + sum(self._column_widths(items)))
+
+    def _draw_section_header(self, y, title, width, expanded):
+        fill = "#dfe8f8" if expanded else "#eef2fa"
+        self.canvas.create_rectangle(0, y, width, y + self.TITLE_H, fill=fill, outline=C_BORDER)
+        marker = "▼" if expanded else "▶"
+        self._text(10, y + self.TITLE_H / 2, f"{marker} {title}", width - 20,
+                   font=("Microsoft YaHei", 10, "bold"))
+        self._section_cells.append({"title": title, "bbox": (0, y, width, y + self.TITLE_H)})
+        return y + self.TITLE_H
+
+    def _draw_table_rows(self, y, title, items, table_w, query, draw_title=True):
+        if query:
+            q = query.lower()
+            items = [
+                p for p in items
+                if q in p["label"].lower()
+                or q in p["s1"].lower()
+                or q in title.lower()
+            ]
+        if not items:
+            if draw_title:
+                return self._draw_section_header(y, title, table_w, True)
+            return y
+
+        col_widths = self._column_widths(items)
+        width = max(table_w, self.FIRST_COL_W + sum(col_widths))
+        header_fill = "#eef2fa"
+        search_fill = "#fff0a6"
+
+        if draw_title:
+            y = self._draw_section_header(y, title, width, True)
+
+        row_labels = [title, "参数值"]
+        rows = [
+            [p["label"] for p in items],
+            [p["s1"] for p in items],
+        ]
+        for row_idx in range(2):
+            first_fill = header_fill if row_idx == 0 else "#f7f9fd"
+            self._draw_cell(0, y, self.FIRST_COL_W, self.ROW_H, row_labels[row_idx],
+                            fill=first_fill, font=("Microsoft YaHei", 9, "bold"))
+            x = self.FIRST_COL_W
+            for col_idx, item in enumerate(items):
+                col_w = col_widths[col_idx]
+                fill = C_WHITE
+                if row_idx == 0:
+                    fill = header_fill
+                if self._search_match_key == self._item_key(item) and row_idx == 0:
+                    fill = search_fill
+                self._draw_cell(
+                    x, y, col_w, self.ROW_H, rows[row_idx][col_idx], fill=fill,
+                    font=("Microsoft YaHei", 9, "bold") if row_idx == 0 else None,
+                    cell_meta={
+                        "item": item,
+                        "text": " ".join([title, item["label"], item["s1"], item.get("note", "")]),
+                    }
+                )
+                x += col_w
+            y += self.ROW_H
+        return y
+
+    def _draw_grouped_section(self, y, section, table_w, query):
+        groups = section.get("groups", [])
+        if query:
+            q = query.lower()
+            filtered = []
+            for g in groups:
+                items = [
+                    p for p in g["items"]
+                    if q in p["label"].lower()
+                    or q in p["s1"].lower()
+                    or q in g["title"].lower()
+                    or q in section["title"].lower()
+                ]
+                if items:
+                    filtered.append({"title": g["title"], "items": items})
+            groups = filtered
+
+        if section["title"] == "电机参数":
+            width = self._motor_table_width(groups, table_w)
+        else:
+            width = max(table_w, max([self._table_width(g["items"], table_w) for g in groups] or [table_w]))
+        is_expanded = bool(query) or section["title"] in self._expanded_sections
+        y = self._draw_section_header(y, section["title"], width, is_expanded)
+        if not is_expanded:
+            return y
+
+        if section["title"] == "电机参数":
+            return self._draw_motor_table(y, groups, width)
+
+        for group_index, group in enumerate(groups):
+            self.canvas.create_rectangle(0, y, width, y + self.ROW_H, fill="#edf4ff", outline=C_BORDER)
+            self._text(14, y + self.ROW_H / 2, group["title"], width - 20,
+                       font=("Microsoft YaHei", 9, "bold"))
+            y += self.ROW_H
+            y = self._draw_table_rows(y, group["title"], group["items"], width, "", draw_title=False)
+        return y
+
+    def _motor_headers(self, groups):
+        headers = []
+        seen = set()
+        for group in groups:
+            for item in group.get("items", []):
+                label = item["label"]
+                if label not in seen:
+                    headers.append(label)
+                    seen.add(label)
+        return headers
+
+    def _motor_column_widths(self, groups, headers):
+        widths = []
+        for label in headers:
+            values = [label]
+            for group in groups:
+                item = next((p for p in group.get("items", []) if p["label"] == label), None)
+                if item:
+                    values.append(item["s1"])
+            content_w = max(self._measure_text(v, bold=(v == label)) for v in values) + 18
+            widths.append(max(self.MIN_COL_W, content_w))
+        return widths
+
+    def _motor_first_col_width(self, groups):
+        labels = ["电机名称"] + [g["title"] for g in groups]
+        return max(self.FIRST_COL_W, max(self._measure_text(label, bold=True) for label in labels) + 18)
+
+    def _motor_table_width(self, groups, table_w):
+        headers = self._motor_headers(groups)
+        return max(table_w, self._motor_first_col_width(groups) + sum(self._motor_column_widths(groups, headers)))
+
+    def _draw_motor_table(self, y, groups, table_w):
+        if not groups:
+            return y
+        headers = self._motor_headers(groups)
+        col_widths = self._motor_column_widths(groups, headers)
+        first_col_w = self._motor_first_col_width(groups)
+        header_fill = "#eef2fa"
+        search_fill = "#fff0a6"
+
+        self._draw_cell(0, y, first_col_w, self.ROW_H, "电机名称",
+                        fill=header_fill, font=("Microsoft YaHei", 9, "bold"))
+        x = first_col_w
+        for i, label in enumerate(headers):
+            col_w = col_widths[i]
+            self._draw_cell(x, y, col_w, self.ROW_H, label,
+                            fill=header_fill, font=("Microsoft YaHei", 9, "bold"))
+            x += col_w
+        y += self.ROW_H
+
+        for group in groups:
+            item_by_label = {item["label"]: item for item in group.get("items", [])}
+            self._draw_cell(0, y, first_col_w, self.ROW_H, group["title"],
+                            fill="#f7f9fd", font=("Microsoft YaHei", 9, "bold"))
+            x = first_col_w
+            for i, label in enumerate(headers):
+                col_w = col_widths[i]
+                item = item_by_label.get(label, {"label": label, "s1": "", "s2": "", "note": ""})
+                fill = search_fill if self._search_match_key == self._item_key(item) else C_WHITE
+                self._draw_cell(
+                    x, y, col_w, self.ROW_H, item["s1"], fill=fill,
+                    cell_meta={
+                        "item": item,
+                        "text": " ".join([group["title"], item["label"], item["s1"], item.get("note", "")]),
+                    }
+                )
+                x += col_w
+            y += self.ROW_H
+        return y
+
+    def _populate(self):
+        if not hasattr(self, "canvas"):
+            return
+        self.canvas.delete("all")
+        self._drawn_cells = []
+        self._section_cells = []
+        sections = self._build_param_sections()
+        param_count = sum(
+            1 for section in sections
+            for item in (section.get("items", []) if not section.get("grouped") else
+                         [p for g in section.get("groups", []) for p in g.get("items", [])])
+        )
+        self._diff_lbl.config(text=f"参数数：{param_count}")
+
+        query = self._search_var.get().strip().lower()
+        y = 0
+        table_w = max(self.MIN_TABLE_W, self.canvas.winfo_width() - 2)
+        for section in sections:
+            before = y
+            if section.get("grouped"):
+                y = self._draw_grouped_section(y, section, table_w, query)
+            else:
+                is_expanded = bool(query) or section["title"] in self._expanded_sections
+                items = section.get("items", [])
+                width = self._table_width(items, table_w)
+                if is_expanded:
+                    y = self._draw_table_rows(y, section["title"], items, table_w, query)
+                else:
+                    y = self._draw_section_header(y, section["title"], width, False)
+            if y != before:
+                y += self.GAP_H
+        self.canvas.configure(scrollregion=(0, 0, max(table_w, self.canvas.bbox("all")[2] if self.canvas.bbox("all") else table_w), y))
+        if self._search_match_key:
+            self._scroll_to_match()
+
+    def _apply_filter(self):
+        self._populate()
+
+    def _do_search(self):
+        query = self._search_var.get().strip().lower()
+        self._search_match_key = None
+        if query:
+            for section in self._build_param_sections():
+                if section.get("grouped"):
+                    pools = [p for g in section.get("groups", []) for p in g.get("items", [])]
+                else:
+                    pools = section.get("items", [])
+                for item in pools:
+                    text = " ".join([item["label"], item["s1"], item.get("note", "")]).lower()
+                    if query in text:
+                        self._search_match_key = self._item_key(item)
+                        break
+                if self._search_match_key:
+                    break
+        self._populate()
+
+    def _scroll_to_match(self):
+        for cell in self._drawn_cells:
+            if self._item_key(cell.get("item")) == self._search_match_key:
+                x1, y1, x2, y2 = cell["bbox"]
+                bbox = self.canvas.bbox("all")
+                if bbox:
+                    total_h = max(1, bbox[3] - bbox[1])
+                    total_w = max(1, bbox[2] - bbox[0])
+                    self.canvas.yview_moveto(max(0, (y1 - 40) / total_h))
+                    self.canvas.xview_moveto(max(0, (x1 - self.FIRST_COL_W) / total_w))
+                break
+
+    def _on_canvas_click(self, event):
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        for cell in self._section_cells:
+            x1, y1, x2, y2 = cell["bbox"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                title = cell["title"]
+                if title in self._expanded_sections:
+                    self._expanded_sections.remove(title)
+                else:
+                    self._expanded_sections.add(title)
+                self._populate()
+                return
+
+    def _on_canvas_double_click(self, event):
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        for cell in self._drawn_cells:
+            x1, y1, x2, y2 = cell["bbox"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                item = cell.get("item")
+                note = item.get("note", "") if item else ""
+                if note:
+                    messagebox.showinfo("备注说明", f"{item['label']}\n\n{note}", parent=self)
+                return
+
+
 # ── ParamNotesDialog ─────────────────────────────────────────────────────────
 
 class ParamNotesDialog(tk.Toplevel):
@@ -2256,14 +2982,16 @@ class ParamNotesDialog(tk.Toplevel):
             _json.dump(self._param_notes, f, ensure_ascii=False, indent=2)
         # 同步刷新 ParamsView
         if self.param_view:
-            self.param_view._load_param_notes()
-            self.param_view._populate()
+            views = self.param_view if isinstance(self.param_view, (list, tuple)) else [self.param_view]
+            for view in views:
+                view._load_param_notes()
+                view._populate()
 
     # ── UI ───────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         tk.Label(self, text="双击「备注说明」列可编辑，备注将同步显示在整机参数对比列表中",
-                 bg=C_BG, fg=C_TEXT2, font=("Microsoft YaHei", 8)
+                 bg=C_BG, fg=C_TEXT2, font=("Microsoft YaHei", 9)
                  ).pack(anchor="w", padx=12, pady=(8, 2))
 
         tree_frame = tk.Frame(self, bg=C_CARD)
@@ -2369,7 +3097,7 @@ class StandardFlowDialog(tk.Toplevel):
 
         self._status_var = tk.StringVar(value="")
         tk.Label(bar, textvariable=self._status_var, bg=C_BG,
-                 fg=C_TEXT2, font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=8)
+                 fg=C_TEXT2, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=8)
 
         # ── 动作序列树状列表 ──
         frame = tk.Frame(self, bg=C_CARD, bd=1, relief="solid")
@@ -2480,8 +3208,8 @@ class FA120App:
         self._loading = False
         self._load_executor = None
         self._load_future = None
-        self._self_check_details = {}
         self._syncing_sample_selection = False
+        self._raw_font_size = 11
 
         # 尝试加载预设文件
         self._load_presets()
@@ -2543,10 +3271,6 @@ class FA120App:
                     self.parser.all_components.append(c)
                     existing.add(c)
 
-        # 各模式标准动作序列
-        std_seq_path = os.path.join(app_dir, "standard_sequences.json")
-        self.parser.load_standard_sequences(std_seq_path)
-
         # 一级动作名称（例如桌面的 FA120动作日志帧头）
         action_name_paths = [
             os.path.join(app_dir, "FA120动作日志帧头.txt"),
@@ -2571,14 +3295,14 @@ class FA120App:
               bordercolor=[("focus", C_BLUE)])
         s.configure("TCheckbutton",
                     background=C_BG2, foreground=C_TEXT,
-                    font=("Microsoft YaHei", 8))
+                    font=("Microsoft YaHei", 9))
         s.map("TCheckbutton", background=[("active", C_BG2)])
         s.configure("Treeview",
-                    rowheight=24, font=("Microsoft YaHei", 9),
+                    rowheight=24, font=("Microsoft YaHei", 10),
                     background=C_WHITE, fieldbackground=C_WHITE,
                     foreground=C_TEXT, bordercolor=C_BORDER)
         s.configure("Treeview.Heading",
-                    font=("Microsoft YaHei", 9, "bold"),
+                    font=("Microsoft YaHei", 10, "bold"),
                     background=C_BLUE, foreground=C_WHITE,
                     relief="flat", borderwidth=0)
         s.map("Treeview.Heading",
@@ -2604,29 +3328,24 @@ class FA120App:
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
         self.load_btn = tk.Button(toolbar, text="载入日志", command=self._load_log,
-                                  bg=C_BLUE, fg=C_WHITE, font=("Microsoft YaHei", 9),
+                                  bg=C_BLUE, fg=C_WHITE, font=("Microsoft YaHei", 10),
                                   relief="flat", padx=12, pady=3, cursor="hand2")
         self.load_btn.pack(side=tk.LEFT, padx=8)
-        tk.Button(toolbar, text="动作设置", command=self._open_theory_dialog,
-                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 9),
+        tk.Button(toolbar, text="动作备注", command=self._open_theory_dialog,
+                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 10),
                   relief="flat", padx=12, pady=3, bd=1, cursor="hand2"
                   ).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="电机名称设置", command=self._open_action_name_dialog,
-                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 9),
+        tk.Button(toolbar, text="电机备注", command=self._open_action_name_dialog,
+                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 10),
                   relief="flat", padx=12, pady=3, cursor="hand2"
                   ).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="整机参数设置", command=self._open_param_notes_dialog,
-                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 9),
+        tk.Button(toolbar, text="参数备注", command=self._open_param_notes_dialog,
+                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 10),
                   relief="flat", padx=12, pady=3, cursor="hand2"
                   ).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="标准流程", command=self._open_standard_flow_dialog,
-                  bg=C_WHITE, fg=C_TEXT, font=("Microsoft YaHei", 9),
-                  relief="flat", padx=12, pady=3, cursor="hand2"
-                  ).pack(side=tk.LEFT, padx=4)
-
         # 文件名显示
         self.file_label = tk.Label(toolbar, text="未载入文件", bg=C_BG2,
-                                   fg=C_TEXT2, font=("Microsoft YaHei", 8))
+                                   fg=C_TEXT2, font=("Microsoft YaHei", 9))
         self.file_label.pack(side=tk.RIGHT, padx=10)
 
         self.main_notebook = ttk.Notebook(self.root)
@@ -2643,12 +3362,28 @@ class FA120App:
         self.main_notebook.add(self.params_tab, text="整机参数")
 
         app_dir = _app_dir()
-        self._param_view = ParamsView(self.params_tab, app_dir)
+        self.params_notebook = ttk.Notebook(self.params_tab)
+        self.params_notebook.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        self.params_table_page = tk.Frame(self.params_notebook, bg=C_CARD)
+        self.params_compare_page = tk.Frame(self.params_notebook, bg=C_CARD)
+        self.params_notebook.add(self.params_table_page, text="整机参数")
+        self.params_notebook.add(self.params_compare_page, text="参数对比")
+
+        self._param_table_view = ParamsTableView(self.params_table_page, app_dir)
+        self._param_table_view.pack(fill=tk.BOTH, expand=True)
+        self._param_view = ParamsView(self.params_compare_page, app_dir)
         self._param_view.pack(fill=tk.BOTH, expand=True)
+        self._param_views = [self._param_view, self._param_table_view]
 
         self._build_instrument_tab()
         self._build_sample_tab()
         self._build_alarm_tab()
+
+    def _sync_param_views(self, source, idx, data, name):
+        for view in getattr(self, "_param_views", []):
+            if view is source:
+                continue
+            view.set_shared_data(source.data, source.file_names)
 
     def _create_tree(self, parent, columns, widths=None, height=None):
         frame = tk.Frame(parent, bg=C_CARD)
@@ -2670,108 +3405,49 @@ class FA120App:
 
     def _build_instrument_tab(self):
         summary_frame = tk.LabelFrame(self.instrument_tab, text="关于本机",
-                                      bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold"),
+                                      bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 11, "bold"),
                                       padx=8, pady=6)
         summary_frame.pack(fill=tk.X, padx=10, pady=(6, 4))
         self.instrument_value_labels = {}
         field_columns = [
             [
-                ("仪器序列号", "device_serial"),
                 ("日志时间", "log_time"),
-                ("4G CCID", "ccid"),
-                ("信号强度", "signal_strength"),
+                ("仪器序列号", "device_serial"),
                 ("用户程序版本", "user_program_version"),
+                ("中位机版本", "mid_version"),
             ],
             [
-                ("中位机版本", "mid_version"),
-                ("MCU1版本", "mcu1_version"),
-                ("MCU2版本", "mcu2_version"),
-                ("MCU3版本", "mcu3_version"),
+                ("MCU3版本", "mcu2_version"),
+                ("MCU2版本", "mcu1_version"),
+                ("MCU1版本", "mcu0_version"),
                 ("温控版本", "temp_control_version"),
             ],
             [
-                ("累计申请次数", "request_count"),
+                ("申请样本次数", "request_count"),
                 ("累计检测次数", "detect_count"),
                 ("累计开盖次数", "open_cap_count"),
                 ("日志编排数", "current_arrangement_count"),
+            ],
+            [
+                ("4G CCID", "ccid"),
+                ("信号强度", "signal_strength"),
             ],
         ]
         for col, fields in enumerate(field_columns):
             base_col = col * 2
             for row, (label_text, key) in enumerate(fields):
                 tk.Label(summary_frame, text=f"{label_text}:", bg=C_CARD, fg=C_TEXT,
-                         font=("Microsoft YaHei", 9, "bold")).grid(
+                         font=("Microsoft YaHei", 10, "bold")).grid(
                              row=row, column=base_col, sticky="w", padx=(0, 6), pady=2)
                 value_label = tk.Label(summary_frame, text="-", bg=C_CARD, fg=C_TEXT2,
-                                       font=("Microsoft YaHei", 9), anchor="w")
+                                       font=("Microsoft YaHei", 10), anchor="w")
                 value_label.grid(row=row, column=base_col + 1, sticky="w", padx=(0, 14), pady=2)
                 self.instrument_value_labels[key] = value_label
-        for col in range(6):
+        for col in range(8):
             summary_frame.grid_columnconfigure(col, weight=1 if col % 2 else 0)
 
-        selfcheck_frame = tk.LabelFrame(self.instrument_tab, text="自检信息",
-                                        bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold"),
-                                        padx=6, pady=6)
-        selfcheck_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
-        selfcheck_split = tk.Frame(selfcheck_frame, bg=C_CARD)
-        selfcheck_split.pack(fill=tk.BOTH, expand=True)
-        selfcheck_split.grid_columnconfigure(0, weight=1, uniform="instrument_halves")
-        selfcheck_split.grid_columnconfigure(1, weight=1, uniform="instrument_halves")
-        selfcheck_split.grid_rowconfigure(0, weight=1)
-
-        self.self_check_only_issues_var = tk.BooleanVar(value=False)
-        self.self_check_filter_cb = tk.Checkbutton(
-            selfcheck_frame,
-            text="仅显示异常",
-            variable=self.self_check_only_issues_var,
-            command=self._populate_instrument_tab,
-            bg=C_CARD,
-            fg=C_TEXT,
-            activebackground=C_CARD,
-            activeforeground=C_TEXT,
-            selectcolor=C_CARD,
-            font=("Microsoft YaHei", 9),
-        )
-        self.self_check_filter_cb.place(relx=1.0, x=-10, y=2, anchor="ne")
-
-        selfcheck_left = tk.Frame(selfcheck_split, bg=C_CARD)
-        selfcheck_left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        tree_frame, self.self_check_tree = self._create_tree(
-            selfcheck_left,
-            ("自检时间", "MCU编号", "状态"),
-            widths=[90, 80, 100],
-            height=5,
-        )
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        self.self_check_tree.bind("<<TreeviewSelect>>", self._on_self_check_select)
-        self.self_check_tree.tag_configure("error_status", foreground=C_RED)
-        self.self_check_tree.tag_configure("warn_status", foreground="#ef6c00")
-
-        detail_frame = tk.Frame(selfcheck_split, bg=C_CARD)
-        detail_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        tk.Label(detail_frame, text="错误详情", bg=C_CARD, fg=C_TEXT,
-                 font=("Microsoft YaHei", 9, "bold")).pack(anchor="w", pady=(0, 4))
-
-        text_frame = tk.Frame(detail_frame, bg=C_CARD)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-        self.self_check_detail = tk.Text(
-            text_frame,
-            height=6,
-            wrap="word",
-            bg=C_WHITE,
-            fg=C_TEXT,
-            font=("Microsoft YaHei", 9),
-            relief="solid",
-            bd=1,
-        )
-        detail_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.self_check_detail.yview)
-        self.self_check_detail.configure(yscrollcommand=detail_scroll.set)
-        self.self_check_detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._set_self_check_detail("请选择一条自检记录查看详情")
-
         action_frame = tk.LabelFrame(self.instrument_tab, text="用户动作",
-                                     bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold"),
+                                     bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 11, "bold"),
                                      padx=6, pady=6)
         action_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
         action_split = tk.Frame(action_frame, bg=C_CARD)
@@ -2782,22 +3458,102 @@ class FA120App:
 
         action_left = tk.Frame(action_split, bg=C_CARD)
         action_left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        filter_bar = tk.Frame(action_left, bg=C_CARD)
+        filter_bar.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(filter_bar, text="筛选：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.user_action_filter_vars = {}
+        self.user_action_all_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(filter_bar, text="全选", variable=self.user_action_all_var,
+                       command=self._toggle_all_user_action_filters,
+                       bg=C_CARD, fg=C_TEXT, selectcolor=C_CARD,
+                       activebackground=C_CARD,
+                       font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 4))
+        for text in ("开机", "自检", "编排", "装载弹夹", "稀释液装载", "耗材更换"):
+            var = tk.BooleanVar(value=True)
+            self.user_action_filter_vars[text] = var
+            tk.Checkbutton(filter_bar, text=text, variable=var,
+                           command=self._on_user_action_filter_changed,
+                           bg=C_CARD, fg=C_TEXT, selectcolor=C_CARD,
+                           activebackground=C_CARD,
+                           font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=2)
+
         tree_frame, self.user_action_tree = self._create_tree(
             action_left,
             ("动作时间", "动作", "详情"),
-            widths=[90, 110, 220],
+            widths=[82, 140, 380],
             height=8,
         )
+        self.user_action_tree.column("动作时间", width=82, minwidth=76, anchor="center", stretch=False)
+        self.user_action_tree.column("动作", width=140, minwidth=120, anchor="center", stretch=False)
+        self.user_action_tree.column("详情", width=380, minwidth=300, anchor="w", stretch=False)
         tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.user_action_tree.bind("<<TreeviewSelect>>", self._on_user_action_select)
+        self.user_action_tree.bind("<Configure>", self._resize_user_action_columns, add="+")
+        self.user_action_tree.tag_configure("action_error", foreground=C_RED)
 
-        action_placeholder = tk.Frame(action_split, bg=C_CARD, bd=1, relief="solid")
-        action_placeholder.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        tk.Label(action_placeholder, text="预留区域", bg=C_CARD, fg=C_TEXT2,
-                 font=("Microsoft YaHei", 10)).pack(expand=True)
+        preview_frame = tk.Frame(action_split, bg=C_CARD)
+        preview_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        preview_frame.grid_rowconfigure(1, weight=1)
+        preview_frame.grid_columnconfigure(0, weight=1)
+
+        search_bar = tk.Frame(preview_frame, bg=C_CARD)
+        search_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        tk.Label(search_bar, text="原文搜索：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.raw_search_var1 = tk.StringVar()
+        self.raw_search_var2 = tk.StringVar()
+        self.raw_search_mode_var = tk.StringVar(value="或")
+        self.raw_search_entry1 = ttk.Entry(search_bar, textvariable=self.raw_search_var1, width=16)
+        self.raw_search_entry1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
+        self.raw_search_mode = ttk.Combobox(
+            search_bar,
+            textvariable=self.raw_search_mode_var,
+            values=("或", "和"),
+            state="readonly",
+            width=4,
+        )
+        self.raw_search_mode.pack(side=tk.LEFT, padx=2)
+        self.raw_search_entry2 = ttk.Entry(search_bar, textvariable=self.raw_search_var2, width=16)
+        self.raw_search_entry2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.raw_search_entry1.bind("<Return>", lambda e: self._search_raw_text("down"))
+        self.raw_search_entry2.bind("<Return>", lambda e: self._search_raw_text("down"))
+        tk.Button(search_bar, text="向上", command=lambda: self._search_raw_text("up"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Button(search_bar, text="向下", command=lambda: self._search_raw_text("down"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Separator(search_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+        tk.Button(search_bar, text="A+", command=lambda: self._adjust_raw_font_size(1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT)
+        tk.Button(search_bar, text="A-", command=lambda: self._adjust_raw_font_size(-1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT, padx=(2, 0))
+
+        raw_text_frame = tk.Frame(preview_frame, bg=C_CARD)
+        raw_text_frame.grid(row=1, column=0, sticky="nsew")
+        raw_text_frame.grid_rowconfigure(0, weight=1)
+        raw_text_frame.grid_columnconfigure(0, weight=1)
+        self.raw_text = tk.Text(
+            raw_text_frame,
+            wrap="none",
+            bg=C_WHITE,
+            fg=C_TEXT,
+            font=("Consolas", 11),
+            relief="solid",
+            bd=1,
+        )
+        raw_vsb = ttk.Scrollbar(raw_text_frame, orient=tk.VERTICAL, command=self.raw_text.yview)
+        raw_hsb = ttk.Scrollbar(raw_text_frame, orient=tk.HORIZONTAL, command=self.raw_text.xview)
+        self.raw_text.configure(yscrollcommand=raw_vsb.set, xscrollcommand=raw_hsb.set)
+        self.raw_text.grid(row=0, column=0, sticky="nsew")
+        raw_vsb.grid(row=0, column=1, sticky="ns")
+        raw_hsb.grid(row=1, column=0, sticky="ew")
+        self.raw_text.tag_configure("source_highlight", background="#fff59d")
+        self.raw_text.tag_configure("search_highlight", background="#c8e6c9")
+        self.raw_text.config(state="disabled")
 
     def _build_sample_tab(self):
         sample_list_frame = tk.LabelFrame(self.sample_tab, text="样本编排信息",
-                                          bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold"),
+                                          bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 11, "bold"),
                                           padx=8, pady=8)
         sample_list_frame.pack(fill=tk.X, padx=10, pady=(6, 8))
 
@@ -2811,16 +3567,16 @@ class FA120App:
         self._stat_unknown_var = tk.StringVar(value="未知: 0")
 
         tk.Label(stat_frame, textvariable=self._stat_total_var,
-                 bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT, padx=(0, 12))
+                 bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold")).pack(side=tk.LEFT, padx=(0, 12))
         tk.Label(stat_frame, textvariable=self._stat_done_var,
-                 bg=C_CARD, fg="#1a7f3c", font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT, padx=(0, 12))
+                 bg=C_CARD, fg="#1a7f3c", font=("Microsoft YaHei", 10, "bold")).pack(side=tk.LEFT, padx=(0, 12))
         tk.Label(stat_frame, textvariable=self._stat_error_var,
-                 bg=C_CARD, fg=C_RED, font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT, padx=(0, 12))
+                 bg=C_CARD, fg=C_RED, font=("Microsoft YaHei", 10, "bold")).pack(side=tk.LEFT, padx=(0, 12))
         tk.Label(stat_frame, textvariable=self._stat_unknown_var,
-                 bg=C_CARD, fg=C_TEXT2, font=("Microsoft YaHei", 9)).pack(side=tk.LEFT, padx=(0, 20))
+                 bg=C_CARD, fg=C_TEXT2, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=(0, 20))
 
         tk.Label(stat_frame, text="显示：", bg=C_CARD, fg=C_TEXT,
-                 font=("Microsoft YaHei", 9)).pack(side=tk.LEFT)
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
         self._filter_done_var    = tk.BooleanVar(value=True)
         self._filter_error_var   = tk.BooleanVar(value=True)
         self._filter_unknown_var = tk.BooleanVar(value=True)
@@ -2832,22 +3588,56 @@ class FA120App:
             tk.Checkbutton(stat_frame, text=text, variable=var,
                            command=self._apply_sample_filter,
                            bg=C_CARD, fg=fg, selectcolor=C_CARD,
-                           font=("Microsoft YaHei", 9),
+                           font=("Microsoft YaHei", 10),
                            activebackground=C_CARD).pack(side=tk.LEFT, padx=4)
 
+        # ── R-01 样本搜索框 ──
+        search_frame = tk.Frame(sample_list_frame, bg=C_CARD)
+        search_frame.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(search_frame, text="搜索：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self._sample_search_var = tk.StringVar()
+        self._sample_search_var.trace_add("write", lambda *_: self._apply_sample_filter())
+        ttk.Entry(search_frame, textvariable=self._sample_search_var,
+                  width=24).pack(side=tk.LEFT, padx=4)
+
+        # ── 左右分栏：左侧样本列表 / 右侧项目测试结果 ──
+        split_frame = tk.Frame(sample_list_frame, bg=C_CARD)
+        split_frame.pack(fill=tk.BOTH, expand=True)
+        split_frame.grid_columnconfigure(0, weight=3)
+        split_frame.grid_columnconfigure(1, weight=1)
+        split_frame.grid_rowconfigure(0, weight=1)
+
+        left_frame = tk.Frame(split_frame, bg=C_CARD)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
         tree_frame, self.sample_tree = self._create_tree(
-            sample_list_frame,
-            ("编排时间", "流水号", "样本ID", "样本类型", "样本位置", "测试数", "开盖", "摇匀", "项目", "项目缩写", "项目模式", "样本状态", "完成时间", "浓度", "测试值"),
-            widths=[80, 60, 130, 60, 60, 45, 45, 45, 100, 80, 80, 80, 80, 70, 90],
+            left_frame,
+            ("编排时间", "编号", "样本ID", "样本类型", "样本位置", "测试数", "开盖", "摇匀", "项目", "样本状态"),
+            widths=[80, 60, 130, 60, 60, 45, 45, 45, 100, 80],
             height=7,
         )
-        tree_frame.pack(fill=tk.X, expand=True)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
         self.sample_tree.bind("<<TreeviewSelect>>", self._on_sample_tree_select)
+
+        right_panel = tk.LabelFrame(split_frame, text="项目测试结果",
+                                    bg=C_CARD, fg=C_TEXT,
+                                    font=("Microsoft YaHei", 10, "bold"),
+                                    padx=4, pady=4)
+        right_panel.grid(row=0, column=1, sticky="nsew")
+
+        result_tree_frame, self.result_tree = self._create_tree(
+            right_panel,
+            ("项目缩写", "项目模式", "完成时间", "浓度", "测试值"),
+            widths=[80, 80, 80, 70, 90],
+            height=7,
+        )
+        result_tree_frame.pack(fill=tk.BOTH, expand=True)
 
         ttk.Separator(self.sample_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
 
         detail_frame = tk.LabelFrame(self.sample_tab, text="样本动作详情",
-                                     bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 10, "bold"),
+                                     bg=C_CARD, fg=C_TEXT, font=("Microsoft YaHei", 11, "bold"),
                                      padx=8, pady=8)
         detail_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
@@ -2857,12 +3647,12 @@ class FA120App:
         self._view_var = tk.StringVar(value="table")
         tk.Radiobutton(tab_frame, text="表格视图", variable=self._view_var,
                        value="table", command=self._switch_view,
-                       bg=C_BG2, fg=C_TEXT, font=("Microsoft YaHei", 9),
+                       bg=C_BG2, fg=C_TEXT, font=("Microsoft YaHei", 10),
                        selectcolor=C_BG2, indicatoron=0, padx=15, pady=3,
                        relief="flat").pack(side=tk.LEFT, padx=2, pady=2)
-        tk.Radiobutton(tab_frame, text="时间轴视图", variable=self._view_var,
-                       value="timeline", command=self._switch_view,
-                       bg=C_BG2, fg=C_TEXT, font=("Microsoft YaHei", 9),
+        tk.Radiobutton(tab_frame, text="日志原文", variable=self._view_var,
+                       value="rawlog", command=self._switch_view,
+                       bg=C_BG2, fg=C_TEXT, font=("Microsoft YaHei", 10),
                        selectcolor=C_BG2, indicatoron=0, padx=15, pady=3,
                        relief="flat").pack(side=tk.LEFT, padx=2, pady=2)
 
@@ -2872,24 +3662,149 @@ class FA120App:
         self.table_view = TableView(self.view_container, self)
         self.table_view.pack(fill=tk.BOTH, expand=True)
 
-    def _build_alarm_tab(self):
-        tk.Label(self.alarm_tab, text="异常信息", bg=C_CARD, fg=C_RED,
-                 font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
-        alarm_tree_frame, self.alarm_tree = self._create_tree(
-            self.alarm_tab,
-            ("时间", "错误编号", "样本", "动作", "报警内容", "详情"),
-            widths=[90, 100, 80, 80, 180, 520],
+        # 日志原文视图
+        self.sample_raw_frame = tk.Frame(self.view_container, bg=C_CARD)
+        self.sample_raw_frame.grid_rowconfigure(1, weight=1)
+        self.sample_raw_frame.grid_columnconfigure(0, weight=1)
+
+        sample_raw_search_bar = tk.Frame(self.sample_raw_frame, bg=C_CARD)
+        sample_raw_search_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        tk.Label(sample_raw_search_bar, text="原文搜索：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.sample_raw_search_var1 = tk.StringVar()
+        self.sample_raw_search_var2 = tk.StringVar()
+        self.sample_raw_search_mode_var = tk.StringVar(value="或")
+        self.sample_raw_search_entry1 = ttk.Entry(sample_raw_search_bar,
+                                                   textvariable=self.sample_raw_search_var1, width=16)
+        self.sample_raw_search_entry1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
+        ttk.Combobox(sample_raw_search_bar, textvariable=self.sample_raw_search_mode_var,
+                     values=("或", "和"), state="readonly", width=4).pack(side=tk.LEFT, padx=2)
+        self.sample_raw_search_entry2 = ttk.Entry(sample_raw_search_bar,
+                                                   textvariable=self.sample_raw_search_var2, width=16)
+        self.sample_raw_search_entry2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.sample_raw_search_entry1.bind("<Return>", lambda e: self._search_sample_raw_text("down"))
+        self.sample_raw_search_entry2.bind("<Return>", lambda e: self._search_sample_raw_text("down"))
+        tk.Button(sample_raw_search_bar, text="向上",
+                  command=lambda: self._search_sample_raw_text("up"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Button(sample_raw_search_bar, text="向下",
+                  command=lambda: self._search_sample_raw_text("down"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Separator(sample_raw_search_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+        tk.Button(sample_raw_search_bar, text="A+", command=lambda: self._adjust_raw_font_size(1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT)
+        tk.Button(sample_raw_search_bar, text="A-", command=lambda: self._adjust_raw_font_size(-1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT, padx=(2, 0))
+
+        raw_text_frame = tk.Frame(self.sample_raw_frame, bg=C_CARD)
+        raw_text_frame.grid(row=1, column=0, sticky="nsew")
+        raw_text_frame.grid_rowconfigure(0, weight=1)
+        raw_text_frame.grid_columnconfigure(0, weight=1)
+        self.sample_raw_text = tk.Text(
+            raw_text_frame, wrap="none", bg=C_WHITE, fg=C_TEXT,
+            font=("Consolas", 11), relief="solid", bd=1,
         )
-        alarm_tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        srvsb = ttk.Scrollbar(raw_text_frame, orient=tk.VERTICAL, command=self.sample_raw_text.yview)
+        srhsb = ttk.Scrollbar(raw_text_frame, orient=tk.HORIZONTAL, command=self.sample_raw_text.xview)
+        self.sample_raw_text.configure(yscrollcommand=srvsb.set, xscrollcommand=srhsb.set)
+        self.sample_raw_text.grid(row=0, column=0, sticky="nsew")
+        srvsb.grid(row=0, column=1, sticky="ns")
+        srhsb.grid(row=1, column=0, sticky="ew")
+        self.sample_raw_text.tag_configure("source_highlight", background="#fff59d")
+        self.sample_raw_text.tag_configure("search_highlight", background="#c8e6c9")
+        self.sample_raw_text.config(state="disabled")
+
+    def _build_alarm_tab(self):
+        alarm_split = tk.Frame(self.alarm_tab, bg=C_CARD)
+        alarm_split.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        alarm_split.grid_columnconfigure(0, weight=1, uniform="alarm_halves")
+        alarm_split.grid_columnconfigure(1, weight=1, uniform="alarm_halves")
+        alarm_split.grid_rowconfigure(0, weight=1)
+
+        alarm_left = tk.Frame(alarm_split, bg=C_CARD)
+        alarm_left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        tk.Label(alarm_left, text="异常信息", bg=C_CARD, fg=C_RED,
+                 font=("Microsoft YaHei", 11, "bold")).pack(anchor="w", pady=(0, 4))
+        filter_frame = tk.Frame(alarm_left, bg=C_CARD)
+        filter_frame.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(filter_frame, text="显示：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.alarm_show_info_var = tk.BooleanVar(value=True)
+        self.alarm_show_error_var = tk.BooleanVar(value=True)
+        for text, var, fg in [
+            ("信息(C)", self.alarm_show_info_var, C_TEXT),
+            ("异常(G)", self.alarm_show_error_var, C_RED),
+        ]:
+            tk.Checkbutton(filter_frame, text=text, variable=var,
+                           command=self._populate_alarm_tree,
+                           bg=C_CARD, fg=fg, selectcolor=C_CARD,
+                           activebackground=C_CARD,
+                           font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=4)
+        alarm_tree_frame, self.alarm_tree = self._create_tree(
+            alarm_left,
+            ("时间", "异常编号", "详情"),
+            widths=[78, 220, 300],
+        )
+        self.alarm_tree.column("时间", width=78, minwidth=72, anchor="center", stretch=False)
+        self.alarm_tree.column("异常编号", width=220, minwidth=180, anchor="center", stretch=False)
+        self.alarm_tree.column("详情", width=300, minwidth=220, anchor="w", stretch=True)
+        alarm_tree_frame.pack(fill=tk.BOTH, expand=True)
         self.alarm_tree.bind("<<TreeviewSelect>>", self._on_alarm_select)
+
+        alarm_right = tk.Frame(alarm_split, bg=C_CARD)
+        alarm_right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        alarm_right.grid_rowconfigure(1, weight=1)
+        alarm_right.grid_columnconfigure(0, weight=1)
+        search_bar = tk.Frame(alarm_right, bg=C_CARD)
+        search_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        tk.Label(search_bar, text="原文搜索：", bg=C_CARD, fg=C_TEXT,
+                 font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.alarm_raw_search_var1 = tk.StringVar()
+        self.alarm_raw_search_var2 = tk.StringVar()
+        self.alarm_raw_search_mode_var = tk.StringVar(value="或")
+        self.alarm_raw_search_entry1 = ttk.Entry(search_bar, textvariable=self.alarm_raw_search_var1, width=16)
+        self.alarm_raw_search_entry1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
+        ttk.Combobox(search_bar, textvariable=self.alarm_raw_search_mode_var,
+                     values=("或", "和"), state="readonly", width=4).pack(side=tk.LEFT, padx=2)
+        self.alarm_raw_search_entry2 = ttk.Entry(search_bar, textvariable=self.alarm_raw_search_var2, width=16)
+        self.alarm_raw_search_entry2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self.alarm_raw_search_entry1.bind("<Return>", lambda e: self._search_alarm_raw_text("down"))
+        self.alarm_raw_search_entry2.bind("<Return>", lambda e: self._search_alarm_raw_text("down"))
+        tk.Button(search_bar, text="向上", command=lambda: self._search_alarm_raw_text("up"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Button(search_bar, text="向下", command=lambda: self._search_alarm_raw_text("down"),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=8).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Separator(search_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
+        tk.Button(search_bar, text="A+", command=lambda: self._adjust_raw_font_size(1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT)
+        tk.Button(search_bar, text="A-", command=lambda: self._adjust_raw_font_size(-1),
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=6).pack(side=tk.LEFT, padx=(2, 0))
+
+        raw_text_frame = tk.Frame(alarm_right, bg=C_CARD)
+        raw_text_frame.grid(row=1, column=0, sticky="nsew")
+        raw_text_frame.grid_rowconfigure(0, weight=1)
+        raw_text_frame.grid_columnconfigure(0, weight=1)
+        self.alarm_raw_text = tk.Text(
+            raw_text_frame, wrap="none", bg=C_WHITE, fg=C_TEXT,
+            font=("Consolas", 11), relief="solid", bd=1,
+        )
+        raw_vsb = ttk.Scrollbar(raw_text_frame, orient=tk.VERTICAL, command=self.alarm_raw_text.yview)
+        raw_hsb = ttk.Scrollbar(raw_text_frame, orient=tk.HORIZONTAL, command=self.alarm_raw_text.xview)
+        self.alarm_raw_text.configure(yscrollcommand=raw_vsb.set, xscrollcommand=raw_hsb.set)
+        self.alarm_raw_text.grid(row=0, column=0, sticky="nsew")
+        raw_vsb.grid(row=0, column=1, sticky="ns")
+        raw_hsb.grid(row=1, column=0, sticky="ew")
+        self.alarm_raw_text.tag_configure("source_highlight", background="#fff59d")
+        self.alarm_raw_text.tag_configure("search_highlight", background="#c8e6c9")
+        self.alarm_raw_text.config(state="disabled")
 
     def _switch_view(self):
         view = self._view_var.get()
-        if view == "timeline":
+        if view == "rawlog":
             self.table_view.pack_forget()
-            self.timeline.pack(fill=tk.BOTH, expand=True)
+            self.sample_raw_frame.pack(fill=tk.BOTH, expand=True)
         else:
-            self.timeline.pack_forget()
+            self.sample_raw_frame.pack_forget()
             self.table_view.pack(fill=tk.BOTH, expand=True)
 
     def _load_log(self):
@@ -2917,7 +3832,6 @@ class FA120App:
             "action_names": dict(self.parser.action_names),
             "motor_names": list(self.parser.motor_names),
             "motor_aliases": dict(self.parser.motor_aliases),
-            "standard_sequences": {k: list(v) for k, v in self.parser.standard_sequences.items()},
         }
 
     def _poll_load_result(self):
@@ -2953,6 +3867,8 @@ class FA120App:
         self._populate_instrument_tab()
         self._populate_sample_tree()
         self._populate_alarm_tree()
+        self._load_alarm_raw_text()
+        self._load_sample_raw_text()
 
         if serials:
             self.timeline.set_data([], [], self.parser.motor_names)
@@ -2972,6 +3888,7 @@ class FA120App:
         if not serial:
             self.timeline.set_data([], [], self.parser.motor_names)
             self.table_view.set_data([], [], self.parser.theory_times)
+            self._populate_result_tree("")
             return
 
         if serial in self.sample_tree.get_children():
@@ -2990,98 +3907,310 @@ class FA120App:
         self.timeline.set_data(actions, sample_alarms, self.parser.motor_names,
                                self.parser.system_actions)
         sample = self.parser.samples.get(serial)
-        missing = sample.missing_actions if sample else []
-        # 使用该样本测试模式对应的标准序列（而非全局 standard_action_sequence）
-        mode_standard = self.parser.standard_sequences.get(
-            sample.mode if sample else "", []
-        ) or self.parser.standard_action_sequence
-        self.table_view.set_data(actions, sample_alarms, self.parser.theory_times,
-                                 standard_sequence=mode_standard,
-                                 missing_actions=missing)
+        self.table_view.set_data(actions, sample_alarms, self.parser.theory_times)
+        self._populate_result_tree(serial)
 
     def _on_alarm_select(self, event):
         sel = self.alarm_tree.selection()
         if not sel:
             return
-        vals = self.alarm_tree.item(sel[0], "values")
-        if not vals:
+        item_id = sel[0]
+        alarm = getattr(self, "_alarm_item_map", {}).get(item_id)
+        if not alarm:
             return
-        sample_serial = vals[2]  # 样本流水号
-        action_code = vals[3]    # 动作编号
-        alarm_time = vals[0]     # 报警时间
 
         serials = list(self.parser.samples.keys())
-        if sample_serial in serials:
-            self._select_sample(sample_serial)
-            t_ms = time_to_ms(alarm_time + ".000") if '.' not in alarm_time else time_to_ms(alarm_time)
+        if alarm.sample_num in serials:
+            self._select_sample(alarm.sample_num)
+            t_ms = time_to_ms(alarm.time_str + ".000") if '.' not in alarm.time_str else time_to_ms(alarm.time_str)
             self.timeline.scroll_to_time(t_ms)
-            self.table_view.highlight_action(action_code)
+            self.table_view.highlight_action(alarm.action_code)
+        if alarm.source_line:
+            self._highlight_alarm_raw_lines([alarm.source_line])
 
     def highlight_alarm(self, alarm: Alarm):
         """从时间轴点击报警后，高亮异常信息列表"""
         for item in self.alarm_tree.get_children():
-            vals = self.alarm_tree.item(item, "values")
-            if vals and vals[1] == alarm.error_code and vals[2] == alarm.sample_num:
+            row_alarm = getattr(self, "_alarm_item_map", {}).get(item)
+            if row_alarm and row_alarm.error_code == alarm.error_code and row_alarm.sample_num == alarm.sample_num:
                 self.alarm_tree.selection_set(item)
                 self.alarm_tree.see(item)
+                if row_alarm.source_line:
+                    self._highlight_alarm_raw_lines([row_alarm.source_line])
                 break
-
-    def _set_self_check_detail(self, text: str):
-        self.self_check_detail.config(state="normal")
-        self.self_check_detail.delete("1.0", tk.END)
-        self.self_check_detail.insert("1.0", text)
-        self.self_check_detail.config(state="disabled")
-
-    def _on_self_check_select(self, event):
-        sel = self.self_check_tree.selection()
-        if not sel:
-            self._set_self_check_detail("请选择一条自检记录查看详情")
-            return
-        item_id = sel[0]
-        values = self.self_check_tree.item(item_id, "values")
-        if not values:
-            self._set_self_check_detail("请选择一条自检记录查看详情")
-            return
-
-        status = values[2]
-        full_error = self._self_check_details.get(item_id, "")
-        if status == "完成" or not full_error:
-            self._set_self_check_detail("无错误")
-        else:
-            self._set_self_check_detail(full_error)
 
     def _populate_instrument_tab(self):
         info = self.parser.instrument_info
         for key, label in self.instrument_value_labels.items():
             value = getattr(info, key, "")
-            label.config(text=str(value) if value not in ("", None) else "-")
+            label.config(text=str(value) if value not in ("", None) else "未找到")
+        self._load_raw_text()
+        self._populate_user_action_tree()
 
-        self.self_check_tree.delete(*self.self_check_tree.get_children())
-        self._self_check_details = {}
-        for idx, record in enumerate(self.parser.self_checks):
-            if self.self_check_only_issues_var.get() and record.status == "完成":
-                continue
-            item_id = f"selfcheck-{idx}"
-            tags = ()
-            if record.status == "错误":
-                tags = ("error_status",)
-            elif record.status == "异常后完成":
-                tags = ("warn_status",)
-            self.self_check_tree.insert("", tk.END, iid=item_id, values=(
-                record.check_time,
-                record.mcu,
-                record.status,
-            ), tags=tags)
-            self._self_check_details[item_id] = record.error_info or ""
-        self._set_self_check_detail("请选择一条自检记录查看详情")
+    def _action_category(self, action_type: str) -> str:
+        if "开机" in action_type:
+            return "开机"
+        if "自检" in action_type:
+            return "自检"
+        if "编排" in action_type:
+            return "编排"
+        if "装载弹夹" in action_type:
+            return "装载弹夹"
+        if "稀释液" in action_type:
+            return "稀释液装载"
+        if "耗材更换" in action_type:
+            return "耗材更换"
+        return "全部"
 
+    def _toggle_all_user_action_filters(self):
+        selected = self.user_action_all_var.get()
+        for var in self.user_action_filter_vars.values():
+            var.set(selected)
+        self._populate_user_action_tree()
+
+    def _on_user_action_filter_changed(self):
+        if hasattr(self, "user_action_all_var"):
+            self.user_action_all_var.set(all(var.get() for var in self.user_action_filter_vars.values()))
+        self._populate_user_action_tree()
+
+    def _populate_user_action_tree(self):
         self.user_action_tree.delete(*self.user_action_tree.get_children())
+        self._user_action_item_map = {}
         for idx, record in enumerate(self.parser.user_actions):
-            self.user_action_tree.insert("", tk.END, iid=f"useraction-{idx}", values=(
+            category = self._action_category(record.action_type)
+            filter_vars = getattr(self, "user_action_filter_vars", {})
+            if category != "全部" and filter_vars and not filter_vars.get(category, tk.BooleanVar(value=True)).get():
+                continue
+            tags = ("action_error",) if record.detail == "自检异常" else ()
+            item_id = f"useraction-{idx}"
+            self.user_action_tree.insert("", tk.END, iid=item_id, values=(
                 record.action_time,
                 record.action_type,
                 record.detail,
-            ))
+            ), tags=tags)
+            self._user_action_item_map[item_id] = record
+        self.user_action_tree.after_idle(self._resize_user_action_columns)
+
+    def _resize_user_action_columns(self, event=None):
+        if not hasattr(self, "user_action_tree"):
+            return
+        tree_width = event.width if event is not None else self.user_action_tree.winfo_width()
+        if tree_width <= 1:
+            return
+
+        scrollbar_width = 22
+        available_width = max(602, tree_width - scrollbar_width)
+        min_time_width = 82
+        min_action_width = 140
+        min_detail_width = 380
+        min_total = min_time_width + min_action_width + min_detail_width
+        extra_width = max(0, available_width - min_total)
+
+        time_width = min_time_width + int(extra_width * 0.16)
+        action_width = min_action_width + int(extra_width * 0.24)
+        detail_width = available_width - time_width - action_width
+
+        self.user_action_tree.column("动作时间", width=time_width)
+        self.user_action_tree.column("动作", width=action_width)
+        self.user_action_tree.column("详情", width=detail_width)
+
+    def _load_raw_text(self):
+        if not hasattr(self, "raw_text"):
+            return
+        self.raw_text.config(state="normal")
+        self.raw_text.delete("1.0", tk.END)
+        if self.parser.raw_lines:
+            self.raw_text.insert("1.0", "\n".join(self.parser.raw_lines))
+        self.raw_text.tag_remove("source_highlight", "1.0", tk.END)
+        self.raw_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.raw_text.config(state="disabled")
+
+    def _load_alarm_raw_text(self):
+        if not hasattr(self, "alarm_raw_text"):
+            return
+        self.alarm_raw_text.config(state="normal")
+        self.alarm_raw_text.delete("1.0", tk.END)
+        if self.parser.raw_lines:
+            self.alarm_raw_text.insert("1.0", "\n".join(self.parser.raw_lines))
+        self.alarm_raw_text.tag_remove("source_highlight", "1.0", tk.END)
+        self.alarm_raw_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.alarm_raw_text.config(state="disabled")
+
+    def _load_sample_raw_text(self):
+        if not hasattr(self, "sample_raw_text"):
+            return
+        self.sample_raw_text.config(state="normal")
+        self.sample_raw_text.delete("1.0", tk.END)
+        if self.parser.raw_lines:
+            self.sample_raw_text.insert("1.0", "\n".join(self.parser.raw_lines))
+        self.sample_raw_text.tag_remove("source_highlight", "1.0", tk.END)
+        self.sample_raw_text.tag_remove("search_highlight", "1.0", tk.END)
+        self.sample_raw_text.config(state="disabled")
+
+    def _highlight_sample_raw_lines(self, line_numbers: list[int]):
+        if not hasattr(self, "sample_raw_text"):
+            return
+        self._highlight_lines_in_text(self.sample_raw_text, line_numbers)
+
+    def _search_sample_raw_text(self, direction: str = "down"):
+        if not hasattr(self, "sample_raw_text"):
+            return
+        keyword1 = self.sample_raw_search_var1.get().strip()
+        keyword2 = self.sample_raw_search_var2.get().strip()
+        mode = self.sample_raw_search_mode_var.get()
+        if not keyword1 and not keyword2:
+            messagebox.showinfo("搜索提示", "请输入搜索内容")
+            return
+        match_idx = self._find_raw_match_line(keyword1, keyword2, mode, direction,
+                                               self.sample_raw_text)
+        if match_idx < 0:
+            messagebox.showinfo("搜索提示", "未搜索到相关内容")
+            return
+        line_no = match_idx + 1
+        self.sample_raw_text.config(state="normal")
+        self._highlight_search_keywords(line_no, [keyword1, keyword2], self.sample_raw_text)
+        self.sample_raw_text.see(f"{line_no}.0")
+        self.sample_raw_text.mark_set(tk.INSERT, f"{line_no}.0")
+        self.sample_raw_text.config(state="disabled")
+
+    def _jump_to_action_raw_line(self, act):
+        self._view_var.set("rawlog")
+        self._switch_view()
+        self._highlight_sample_raw_lines([act.source_line])
+
+    def _adjust_raw_font_size(self, delta: int):
+        self._raw_font_size = max(8, min(28, self._raw_font_size + delta))
+        new_font = ("Consolas", self._raw_font_size)
+        for attr in ("raw_text", "alarm_raw_text", "sample_raw_text"):
+            w = getattr(self, attr, None)
+            if w:
+                w.config(font=new_font)
+
+    def _on_user_action_select(self, event):
+        sel = self.user_action_tree.selection()
+        if not sel:
+            return
+        record = getattr(self, "_user_action_item_map", {}).get(sel[0])
+        if record:
+            self._highlight_raw_lines(record.related_lines or [record.source_line])
+
+    def _highlight_raw_lines(self, line_numbers: list[int]):
+        if not hasattr(self, "raw_text"):
+            return
+        self._highlight_lines_in_text(self.raw_text, line_numbers)
+
+    def _highlight_alarm_raw_lines(self, line_numbers: list[int]):
+        if not hasattr(self, "alarm_raw_text"):
+            return
+        self._highlight_lines_in_text(self.alarm_raw_text, line_numbers)
+
+    def _highlight_lines_in_text(self, text_widget: tk.Text, line_numbers: list[int]):
+        text_widget.config(state="normal")
+        text_widget.tag_remove("source_highlight", "1.0", tk.END)
+        valid_lines = [line_no for line_no in line_numbers if line_no > 0]
+        for line_no in valid_lines:
+            text_widget.tag_add("source_highlight", f"{line_no}.0", f"{line_no}.end")
+        if valid_lines:
+            text_widget.see(f"{valid_lines[0]}.0")
+            text_widget.mark_set(tk.INSERT, f"{valid_lines[0]}.0")
+        text_widget.config(state="disabled")
+
+    def _line_has_keyword(self, line: str, keyword: str) -> bool:
+        return keyword.lower() in line.lower()
+
+    def _raw_line_matches_search(self, idx: int, keyword1: str, keyword2: str, mode: str) -> bool:
+        lines = self.parser.raw_lines
+        line = lines[idx]
+        has1 = bool(keyword1) and self._line_has_keyword(line, keyword1)
+        has2 = bool(keyword2) and self._line_has_keyword(line, keyword2)
+        if mode == "或":
+            return has1 or has2
+        if not keyword1 or not keyword2:
+            return has1 or has2
+        if not has1 and not has2:
+            return False
+        start = max(0, idx - 10)
+        end = min(len(lines), idx + 11)
+        if has1:
+            return any(self._line_has_keyword(lines[j], keyword2) for j in range(start, end))
+        return any(self._line_has_keyword(lines[j], keyword1) for j in range(start, end))
+
+    def _find_raw_match_line(self, keyword1: str, keyword2: str, mode: str,
+                             direction: str, text_widget: tk.Text = None) -> int:
+        total = len(self.parser.raw_lines)
+        if total == 0:
+            return -1
+        text_widget = text_widget or self.raw_text
+        try:
+            current_line = int(float(text_widget.index(tk.INSERT).split(".", 1)[0])) - 1
+        except (ValueError, tk.TclError):
+            current_line = 0
+
+        if direction == "up":
+            order = list(range(current_line - 1, -1, -1)) + list(range(total - 1, current_line, -1))
+        else:
+            order = list(range(current_line + 1, total)) + list(range(0, current_line + 1))
+        for idx in order:
+            if self._raw_line_matches_search(idx, keyword1, keyword2, mode):
+                return idx
+        return -1
+
+    def _highlight_search_keywords(self, line_no: int, keywords: list[str], text_widget: tk.Text = None):
+        text_widget = text_widget or self.raw_text
+        text_widget.tag_remove("search_highlight", "1.0", tk.END)
+        for keyword in keywords:
+            if not keyword:
+                continue
+            start = f"{line_no}.0"
+            while True:
+                pos = text_widget.search(keyword, start, stopindex=f"{line_no}.end", nocase=True)
+                if not pos:
+                    break
+                end = f"{pos}+{len(keyword)}c"
+                text_widget.tag_add("search_highlight", pos, end)
+                start = end
+
+    def _search_raw_text(self, direction: str = "down"):
+        if not hasattr(self, "raw_text"):
+            return
+        keyword1 = self.raw_search_var1.get().strip()
+        keyword2 = self.raw_search_var2.get().strip()
+        mode = self.raw_search_mode_var.get()
+        if not keyword1 and not keyword2:
+            messagebox.showinfo("搜索提示", "请输入搜索内容")
+            return
+        match_idx = self._find_raw_match_line(keyword1, keyword2, mode, direction, self.raw_text)
+        if match_idx < 0:
+            messagebox.showinfo("搜索提示", "未搜索到相关内容")
+            return
+
+        line_no = match_idx + 1
+        self.raw_text.config(state="normal")
+        self._highlight_search_keywords(line_no, [keyword1, keyword2], self.raw_text)
+        self.raw_text.see(f"{line_no}.0")
+        self.raw_text.mark_set(tk.INSERT, f"{line_no}.0")
+        self.raw_text.config(state="disabled")
+
+    def _search_alarm_raw_text(self, direction: str = "down"):
+        if not hasattr(self, "alarm_raw_text"):
+            return
+        keyword1 = self.alarm_raw_search_var1.get().strip()
+        keyword2 = self.alarm_raw_search_var2.get().strip()
+        mode = self.alarm_raw_search_mode_var.get()
+        if not keyword1 and not keyword2:
+            messagebox.showinfo("搜索提示", "请输入搜索内容")
+            return
+        match_idx = self._find_raw_match_line(keyword1, keyword2, mode, direction, self.alarm_raw_text)
+        if match_idx < 0:
+            messagebox.showinfo("搜索提示", "未搜索到相关内容")
+            return
+
+        line_no = match_idx + 1
+        self.alarm_raw_text.config(state="normal")
+        self._highlight_search_keywords(line_no, [keyword1, keyword2], self.alarm_raw_text)
+        self.alarm_raw_text.see(f"{line_no}.0")
+        self.alarm_raw_text.mark_set(tk.INSERT, f"{line_no}.0")
+        self.alarm_raw_text.config(state="disabled")
 
     def _populate_sample_tree(self):
         # 统计各状态数量
@@ -3104,12 +4233,13 @@ class FA120App:
         show_done    = self._filter_done_var.get()
         show_error   = self._filter_error_var.get()
         show_unknown = self._filter_unknown_var.get()
+        search_text  = getattr(self, "_sample_search_var", tk.StringVar()).get().strip().lower()
 
         self.sample_tree.delete(*self.sample_tree.get_children())
         for serial in sorted(self.parser.samples.keys()):
             sample = self.parser.samples[serial]
 
-            # 筛选过滤
+            # 状态筛选
             if sample.status == "测试完成" and not show_done:
                 continue
             if sample.status == "异常" and not show_error:
@@ -3118,6 +4248,13 @@ class FA120App:
                 continue
 
             item_text = "、".join(sample.test_items[:2])
+
+            # 搜索过滤（流水号、样本ID、项目）
+            if search_text and not any(
+                search_text in (val or "").lower()
+                for val in [sample.serial, sample.sample_id, item_text]
+            ):
+                continue
             if sample.status == "测试完成":
                 row_tag = ("status_done",)
             elif sample.status == "异常":
@@ -3135,12 +4272,33 @@ class FA120App:
                 "是" if sample.cap_open else "否",
                 "是" if sample.shake else "否",
                 item_text,
-                sample.project_abbr,
-                sample.mode,
                 sample.status,
-                sample.finish_time,
-                sample.concentration,
-                sample.measure_value,
+            ))
+
+    def _populate_result_tree(self, serial: str):
+        if not hasattr(self, "result_tree"):
+            return
+        self.result_tree.delete(*self.result_tree.get_children())
+        if not serial:
+            return
+        sample = self.parser.samples.get(serial)
+        if not sample:
+            return
+        results = getattr(sample, 'test_results', None) or []
+        if not results and sample.project_abbr:
+            results = [{
+                'project_abbr': sample.project_abbr,
+                'concentration': sample.concentration,
+                'measure_value': sample.measure_value,
+                'finish_time': sample.finish_time,
+            }]
+        for r in results:
+            self.result_tree.insert("", tk.END, values=(
+                r.get('project_abbr', ''),
+                sample.mode,
+                r.get('finish_time', ''),
+                r.get('concentration', ''),
+                r.get('measure_value', ''),
             ))
 
     def _apply_sample_filter(self):
@@ -3151,28 +4309,34 @@ class FA120App:
         if prev_serial and prev_serial in self.sample_tree.get_children():
             self.sample_tree.selection_set(prev_serial)
             self.sample_tree.see(prev_serial)
+            self._populate_result_tree(prev_serial)
 
     def _populate_alarm_tree(self):
         self.alarm_tree.delete(*self.alarm_tree.get_children())
+        self._alarm_item_map = {}
+        show_info = self.alarm_show_info_var.get() if hasattr(self, "alarm_show_info_var") else True
+        show_error = self.alarm_show_error_var.get() if hasattr(self, "alarm_show_error_var") else True
         for idx, alarm in enumerate(self.parser.alarms):
-            self.alarm_tree.insert("", tk.END, iid=f"alarm-{idx}", values=(
+            kind = alarm.error_code[:1]
+            if kind == "C" and not show_info:
+                continue
+            if kind == "G" and not show_error:
+                continue
+            item_id = f"alarm-{idx}"
+            description = alarm.detail or alarm.content or alarm.error_code
+            self.alarm_tree.insert("", tk.END, iid=item_id, values=(
                 alarm.time_str,
-                alarm.error_code,
-                alarm.sample_num,
-                alarm.action_code,
-                alarm.content,
-                alarm.detail,
+                alarm.display_code,
+                description,
             ))
+            self._alarm_item_map[item_id] = alarm
 
     def _open_params_tab(self):
         self.main_notebook.select(self.params_tab)
 
     def _open_param_notes_dialog(self):
         app_dir = _app_dir()
-        ParamNotesDialog(self.root, app_dir, param_view=self._param_view)
-
-    def _open_standard_flow_dialog(self):
-        StandardFlowDialog(self.root, self)
+        ParamNotesDialog(self.root, app_dir, param_view=getattr(self, "_param_views", [self._param_view]))
 
     def _open_theory_dialog(self):
         app_dir = _app_dir()
