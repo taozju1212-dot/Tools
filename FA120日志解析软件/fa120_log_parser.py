@@ -60,6 +60,7 @@ class SampleInfo:
     dilution: int        # 稀释倍数
     sample_type: str     # 样本类型
     test_items: list     # 检测项目列表
+    sample_container: str = ""  # 样本容器（如 5mL管有盖）
     arrange_time: str = ""
     mode: str = ""       # 测试模式 (从动作行推断)
     status: str = ""     # 样本状态：测试完成/异常/未知
@@ -204,6 +205,8 @@ class LogParser:
     RE_LOAD_CARTRIDGE = re.compile(r'"[^"]*?(\d+)\(\)')
     RE_DILUENT_SCAN = re.compile(r'试剂盘扫码([0-5])')
     RE_BARCODE_CONTENT = re.compile(r'条码内容：([^"]*)')
+    RE_TUBE_TYPE = re.compile(r'管类型:\s*\d+\s*"([^"]+)"')
+    RE_TIP_RESULT = re.compile(r'"#\d+-(\d{4})\s+-?\d*取TIP:(\d+)"')
     RE_TEST_RESULT = re.compile(
         r'"#\d+-(\d{4})(?:\s+-\d+)?"\s*测试完成\s+项目\s+"([^"]+)"\s+浓度\s+"([^"]+)"\s+测量值\s+(\S+)'
     )
@@ -233,6 +236,7 @@ class LogParser:
         self.self_checks: list[SelfCheckRecord] = []
         self.user_actions: list[UserActionRecord] = []
         self.raw_lines: list[str] = []
+        self.tip_results: dict[str, str] = {}
         self.standard_action_sequence: list[str] = []  # 兼容旧引用：当前日志样本0001的动作序列
         self.standard_sequences: dict[str, list[str]] = {}  # 模式名 -> 标准动作序列，按模式分类存储
 
@@ -365,6 +369,7 @@ class LogParser:
         self.self_checks.clear()
         self.user_actions.clear()
         self.raw_lines = []
+        self.tip_results = {}
 
         for enc in ('utf-8', 'gbk', 'gb2312', 'gb18030'):
             try:
@@ -387,6 +392,8 @@ class LogParser:
 
         self._parse_self_checks(lines)
         self._parse_user_actions(lines)
+        self._parse_tip_results(lines)
+        self._parse_sample_containers(lines)
         self._update_sample_status(lines)
         self._parse_instrument_info(lines)
 
@@ -715,7 +722,10 @@ class LogParser:
                 if barcode and "," in barcode:
                     parts = [part.strip() for part in barcode.split(",")]
                     if len(parts) >= 2 and parts[0] and parts[1]:
+                        batch = parts[2] if len(parts) >= 3 else ""
                         detail = f"稀释液仓{slot}：稀释液号{parts[0]} 项目{parts[1]}"
+                        if batch:
+                            detail += f" 批次{batch}"
                     else:
                         detail = f"稀释液仓{slot}：空"
                 else:
@@ -743,6 +753,33 @@ class LogParser:
                 continue
 
         finalize_self_check()
+
+    def _parse_tip_results(self, lines: list[str]):
+        for line in lines:
+            m = self.RE_TIP_RESULT.search(line)
+            if not m:
+                continue
+            serial = m.group(1)
+            tip_no = int(m.group(2))
+            if tip_no <= 80:
+                x, y = 1, tip_no
+            else:
+                x, y = 2, tip_no - 80
+            self.tip_results[serial] = f"取吸头：{x}-{y}"
+
+    def _parse_sample_containers(self, lines: list[str]):
+        """管类型行向上关联最近的 A01 动作样本号，填入样本容器。"""
+        last_a01_serial = ""
+        for line in lines:
+            stage_match = self.RE_COMPLETE_STAGE.search(line)
+            if stage_match and stage_match.group(3) == "A01":
+                sample_num = stage_match.group(1)
+                if sample_num != "00000":
+                    last_a01_serial = sample_num[-4:]
+
+            tube_match = self.RE_TUBE_TYPE.search(line)
+            if tube_match and last_a01_serial in self.samples:
+                self.samples[last_a01_serial].sample_container = tube_match.group(1).strip()
 
     def _update_sample_status(self, lines: list[str]):
         # 第一阶段：通过 F07.3.3 Finish + 测试完成结果行配对，提取完成数据
@@ -863,6 +900,10 @@ class LogParser:
         )
 
         key = self._make_action_key(sample_num, mode_char, level1, level2_raw)
+        existing = self._pending.get(key)
+        if (existing and existing.start_time == timestamp and existing.component == component
+                and existing.start_pos == start_pos and existing.end_pos == end_pos):
+            return
         action._action_key = key
         self._pending[key] = action
 
@@ -1437,6 +1478,9 @@ class TableView(tk.Frame):
 
             level1_name = (self.app.parser.theory_display_names.get(level1)
                            or self.app.parser.theory_names.get(level1, ""))
+            result_suffix = self._level1_result_suffix(level1, group)
+            if result_suffix:
+                level1_name = f"{level1_name}-（{result_suffix}）" if level1_name else f"{level1}-（{result_suffix}）"
             parent_row = []
             for col in cols:
                 if col == "动作编号":
@@ -1467,14 +1511,16 @@ class TableView(tk.Frame):
             if first_act:
                 self._action_item_map[pid] = first_act
 
-            for act in group:
+            for act_idx, act in enumerate(group):
                 t_start = time_to_ms(act.start_time) if act.start_time else 0
                 t_end   = time_to_ms(act.end_time)   if act.end_time   else 0
                 duration = round(t_end - t_start, 1) if (t_start and t_end) else ""
 
                 child_row = []
                 for col in cols:
-                    if col in ("动作编号", "动作名称"):
+                    if col == "动作编号":
+                        child_row.append("")
+                    elif col == "动作名称":
                         child_row.append("")
                     elif col == "二级动作":
                         child_row.append(act.level2)
@@ -1521,6 +1567,30 @@ class TableView(tk.Frame):
                                 background="#c8dcfa", foreground="#cc6600", font=_bold)
         self._auto_resize_columns()
 
+    def _level1_result_suffix(self, level1: str, group: list[Action]) -> str:
+        serial = group[0].sample_num[-4:] if group else ""
+        if level1 == "E00":
+            return self.app.parser.tip_results.get(serial, "").replace("取吸头：", "")
+        if level1 == "A01":
+            sample = self.app.parser.samples.get(serial)
+            return sample.sample_container if sample and sample.sample_container else ""
+        if level1 == "E05":
+            return self._volume_result_suffix(group, "5.8")
+        if level1 == "E08":
+            return self._volume_result_suffix(group, "5.8")
+        if level1 == "E09":
+            return self._volume_result_suffix(group, "3.7")
+        return ""
+
+    @staticmethod
+    def _volume_result_suffix(group: list[Action], level2_prefix: str) -> str:
+        for act in group:
+            if act.level2.startswith(level2_prefix):
+                volume = abs(act.end_pos - act.start_pos) / 10
+                volume_text = str(int(volume)) if float(volume).is_integer() else f"{volume:.1f}"
+                return f"{volume_text}uL"
+        return ""
+
     @staticmethod
     def _build_ordered_batches(actions: list[Action]) -> list[tuple[str, list[Action]]]:
         """按时间顺序构建执行批次。
@@ -1530,17 +1600,37 @@ class TableView(tk.Frame):
         if not actions:
             return []
 
+        deduped = []
+        seen_actions = set()
+        for act in actions:
+            key = (
+                act.sample_num, act.mode_char, act.level1, act.level2,
+                act.component, act.start_pos, act.end_pos, act.start_time, act.end_time
+            )
+            if key in seen_actions:
+                continue
+            seen_actions.add(key)
+            deduped.append(act)
+        actions = deduped
+
+        e00_batches, consumed = TableView._extract_complete_e00_batches(actions)
         result = []
         i = 0
         n = len(actions)
 
         while i < n:
+            if i in consumed:
+                i += 1
+                continue
             dominant = actions[i].level1
             batch = [actions[i]]
             interleaved = []  # 被穿插的其他level1动作
             i += 1
 
             while i < n:
+                if i in consumed:
+                    i += 1
+                    continue
                 act = actions[i]
                 if act.level1 == dominant:
                     # 同一level1 → 加入当前批次
@@ -1549,7 +1639,7 @@ class TableView(tk.Frame):
                 else:
                     # 不同level1 → 向前查找当前dominant是否还会继续出现
                     found_more = False
-                    for k in range(i + 1, min(i + 8, n)):
+                    for k in range(i + 1, min(i + 40, n)):
                         if actions[k].level1 == dominant:
                             found_more = True
                             break
@@ -1575,7 +1665,53 @@ class TableView(tk.Frame):
                 for il1 in il_order:
                     result.append((il1, il_groups[il1]))
 
-        return result
+        merged: list[tuple[str, list[Action]]] = []
+        for level1, group in sorted(e00_batches + result, key=lambda item: TableView._batch_start_ms(item[1])):
+            if merged and merged[-1][0] == level1:
+                merged[-1][1].extend(group)
+            else:
+                merged.append((level1, group))
+        return merged
+
+    @staticmethod
+    def _batch_start_ms(group: list[Action]) -> int:
+        starts = [time_to_ms(a.start_time) for a in group if a.start_time]
+        return min(starts) if starts else 0
+
+    @staticmethod
+    def _e00_step_key(level2: str) -> str:
+        return level2.split("#", 1)[0].split("(", 1)[0].rstrip(".")
+
+    @staticmethod
+    def _extract_complete_e00_batches(actions: list[Action]) -> tuple[list[tuple[str, list[Action]]], set[int]]:
+        required = ["1.5", "2.6", "3.5", "4.6"]
+        batches: list[tuple[str, list[Action]]] = []
+        consumed: set[int] = set()
+        active: list[tuple[dict[str, Action], list[int]]] = []
+
+        for idx, act in enumerate(actions):
+            if act.level1 != "E00":
+                continue
+            step = TableView._e00_step_key(act.level2)
+            if step not in required:
+                continue
+
+            candidates = [entry for entry in active if step not in entry[0]]
+            if not candidates or step == "1.5":
+                entry = ({}, [])
+                active.append(entry)
+            else:
+                entry = candidates[0]
+            entry[0][step] = act
+            entry[1].append(idx)
+
+            if all(s in entry[0] for s in required):
+                group = [entry[0][s] for s in required]
+                batches.append(("E00", group))
+                consumed.update(entry[1])
+                active.remove(entry)
+
+        return batches, consumed
 
     def highlight_action(self, action_code: str):
         """高亮指定动作编号对应的父行（展开并滚动到视图）"""
@@ -1998,24 +2134,53 @@ class ParamsView(tk.Frame):
             return round(float(v1), 6) != round(float(v2), 6)
         return str(v1) != str(v2)
 
-    def _make_param_item(self, label: str, v1, v2) -> dict:
+    MOTOR_PARAM_ALIASES = {
+        "VMAX时间": "TVMAX",
+        "归零速度": "归零速度",
+        "VMAX速度": "VMAX",
+        "一段速度阈值": "V1",
+        "二段速度阈值": "V2",
+        "一段加速度": "A1",
+        "二段加速度": "A2",
+        "三段加速度": "AMAX",
+        "三段减速度": "DMAX",
+        "二段减速度": "D2",
+        "二段": "D2",
+        "一段减速度": "D1",
+        "一段": "D1",
+        "运行电流": "运行电流",
+        "保持电流": "保持电流",
+    }
+    MOTOR_PARAM_ORDER = [
+        "VMAX时间", "归零速度", "VMAX速度", "一段速度阈值", "二段速度阈值",
+        "一段加速度", "二段加速度", "三段加速度", "三段减速度",
+        "二段减速度", "二段", "一段减速度", "一段", "运行电流", "保持电流",
+    ]
+
+    def _make_param_item(self, label: str, v1, v2, path1=None, path2=None, raw_label=None) -> dict:
         return {
             "label": label,
+            "raw_label": raw_label or label,
             "v1": v1,
             "v2": v2,
             "s1": self._fmt(v1),
             "s2": self._fmt(v2),
             "diff": (v1 is None or v2 is None or self._is_diff(v1, v2)),
             "note": self._param_notes.get(label, ""),
+            "path1": path1,
+            "path2": path2,
         }
 
-    def _value_param_items(self, v1, v2, preferred_labels=None, prefix: str = "") -> list[dict]:
+    def _value_param_items(self, v1, v2, preferred_labels=None, prefix: str = "",
+                           path1=None, path2=None) -> list[dict]:
         if isinstance(v1 or v2, dict):
             sub1, sub2 = (v1 or {}), (v2 or {})
             items = []
             for k in self._merged_keys(sub1, sub2):
                 label = f"{prefix}{k}" if prefix else k
-                items.append(self._make_param_item(label, sub1.get(k), sub2.get(k)))
+                p1 = (path1 or []) + [k]
+                p2 = (path2 or []) + [k]
+                items.append(self._make_param_item(label, sub1.get(k), sub2.get(k), p1, p2, raw_label=k))
             return items
 
         if isinstance(v1 or v2, list):
@@ -2028,10 +2193,19 @@ class ParamsView(tk.Frame):
                 label = f"{prefix}{base_label}" if prefix else base_label
                 e1 = arr1[i] if i < len(arr1) else None
                 e2 = arr2[i] if i < len(arr2) else None
-                items.append(self._make_param_item(label, e1, e2))
+                p1 = (path1 or []) + [i]
+                p2 = (path2 or []) + [i]
+                items.append(self._make_param_item(label, e1, e2, p1, p2, raw_label=base_label))
             return items
 
-        return [self._make_param_item(prefix or "值", v1, v2)]
+        return [self._make_param_item(prefix or "值", v1, v2, path1, path2)]
+
+    def _motor_param_display_label(self, raw_label: str) -> str:
+        return self.MOTOR_PARAM_ALIASES.get(raw_label, raw_label)
+
+    def _sort_motor_items(self, items: list[dict]) -> list[dict]:
+        order = {name: idx for idx, name in enumerate(self.MOTOR_PARAM_ORDER)}
+        return sorted(items, key=lambda item: (order.get(item.get("raw_label", item["label"]), 999), item["label"]))
 
     def _build_param_sections(self) -> list[dict]:
         """生成整机参数的统一展示模型，供树形视图和表格视图复用。"""
@@ -2048,7 +2222,7 @@ class ParamsView(tk.Frame):
         sections: list[dict] = []
 
         system_items = [
-            self._make_param_item(k, d1.get(k), d2.get(k))
+            self._make_param_item(k, d1.get(k), d2.get(k), [k], [k])
             for k in self.SYSTEM_KEYS
             if k in all_keys
         ]
@@ -2064,17 +2238,22 @@ class ParamsView(tk.Frame):
             v2 = adp2[i] if i < len(adp2) else None
             if not named and (v1 or 0) == 0 and (v2 or 0) == 0:
                 continue
-            adp_items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2))
+            adp_items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2,
+                                                   ["ADP", "动作参数", i], ["ADP", "动作参数", i]))
         sections.append({"title": "加样器参数", "grouped": False, "items": adp_items})
 
         motor_groups = []
         for mkey in motor_keys:
             m1, m2 = (d1.get(mkey) or {}), (d2.get(mkey) or {})
-            items = [
-                self._make_param_item(k, m1.get(k), m2.get(k))
-                for k in self._merged_keys(m1, m2)
-                if k != "动作参数"
-            ]
+            items = []
+            for k in self._merged_keys(m1, m2):
+                if k == "动作参数":
+                    continue
+                items.append(self._make_param_item(
+                    self._motor_param_display_label(k), m1.get(k), m2.get(k),
+                    [mkey, k], [mkey, k], raw_label=k
+                ))
+            items = self._sort_motor_items(items)
             motor_groups.append({"title": mkey, "items": items})
         sections.append({"title": "电机参数", "grouped": True, "groups": motor_groups})
 
@@ -2088,7 +2267,8 @@ class ParamsView(tk.Frame):
                 for i, axis in enumerate(["X", "Y", "Z"]):
                     v1 = xyz1[i] if xyz1 and i < len(xyz1) else None
                     v2 = xyz2[i] if xyz2 and i < len(xyz2) else None
-                    coord_items.append(self._make_param_item(f"{pt}  {axis}", v1, v2))
+                    coord_items.append(self._make_param_item(f"{pt}  {axis}", v1, v2,
+                                                             ["坐标", pt, i], ["坐标", pt, i]))
             coord_groups.append({"title": "坐标定位点", "items": coord_items})
         for mkey in motor_keys:
             m1, m2 = (d1.get(mkey) or {}), (d2.get(mkey) or {})
@@ -2101,7 +2281,8 @@ class ParamsView(tk.Frame):
                 v2 = arr2[i] if i < len(arr2) else None
                 if not named and (v1 or 0) == 0 and (v2 or 0) == 0:
                     continue
-                items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2))
+                items.append(self._make_param_item(self._action_names.get(key, f"参数[{i}]"), v1, v2,
+                                                   [mkey, "动作参数", i], [mkey, "动作参数", i]))
             coord_groups.append({"title": f"{mkey}  动作参数", "items": items})
         sections.append({"title": "坐标参数", "grouped": True, "groups": coord_groups})
 
@@ -2110,7 +2291,8 @@ class ParamsView(tk.Frame):
             tc1, tc2 = (d1.get(k) or {}), (d2.get(k) or {})
             temp_groups.append({
                 "title": k,
-                "items": [self._make_param_item(fk, tc1.get(fk), tc2.get(fk)) for fk in self._merged_keys(tc1, tc2)]
+                "items": [self._make_param_item(fk, tc1.get(fk), tc2.get(fk), [k, fk], [k, fk])
+                          for fk in self._merged_keys(tc1, tc2)]
             })
         sections.append({"title": "温控参数", "grouped": True, "groups": temp_groups})
 
@@ -2124,7 +2306,8 @@ class ParamsView(tk.Frame):
                     sample_groups.append({
                         "title": tube,
                         "items": self._value_param_items(sc1.get(tube), sc2.get(tube),
-                                                         ["参数1", "参数2", "参数3", "参数4"])
+                                                         ["参数1", "参数2", "参数3", "参数4"],
+                                                         [sample_key, tube], [sample_key, tube])
                     })
         sections.append({"title": "样本容器", "grouped": True, "groups": sample_groups})
 
@@ -2134,13 +2317,16 @@ class ParamsView(tk.Frame):
         for sk in self._merged_keys(ch1, ch2):
             sv1, sv2 = ch1.get(sk), ch2.get(sk)
             if isinstance(sv1 or sv2, (dict, list)):
-                detection_items.extend(self._value_param_items(sv1, sv2, prefix=f"{sk} "))
+                detection_items.extend(self._value_param_items(sv1, sv2, prefix=f"{sk} ",
+                                                               path1=[channel_key, sk],
+                                                               path2=[channel_key, sk]))
             else:
-                detection_items.append(self._make_param_item(sk, sv1, sv2))
+                detection_items.append(self._make_param_item(sk, sv1, sv2, [channel_key, sk], [channel_key, sk]))
         mb1, mb2 = d1.get("主板参数", {}), d2.get("主板参数", {})
         for k in detection_mainboard_keys:
             if k in mb1 or k in mb2:
-                detection_items.append(self._make_param_item(k, mb1.get(k), mb2.get(k)))
+                detection_items.append(self._make_param_item(k, mb1.get(k), mb2.get(k),
+                                                             ["主板参数", k], ["主板参数", k]))
         sections.append({"title": "检测参数", "grouped": False, "items": detection_items})
 
         return sections
@@ -2587,6 +2773,9 @@ class ParamsTableView(ParamsView):
         tk.Button(top, text="导入整机参数", command=self._load_machine_params,
                   bg=C_BLUE, fg=C_WHITE, relief="flat", padx=10
                   ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(top, text="导出整机参数", command=self._export_machine_params,
+                  bg=C_WHITE, fg=C_TEXT, relief="flat", padx=10
+                  ).pack(side=tk.LEFT, padx=(0, 8))
         self._lbl1 = tk.Label(top, text="（未载入）", bg=C_BG2, fg=C_TEXT2,
                               font=("Microsoft YaHei", 9))
         self._lbl1.pack(side=tk.LEFT, padx=(0, 14))
@@ -2644,6 +2833,23 @@ class ParamsTableView(ParamsView):
         self._lbl1.config(text=name)
         self._expanded_sections.clear()
         self._populate()
+
+    def _export_machine_params(self):
+        if not self.data[0]:
+            messagebox.showinfo("导出提示", "请先导入整机参数。", parent=self)
+            return
+        default_name = self.file_names[0] or "整机参数.json"
+        path = filedialog.asksaveasfilename(
+            title="导出整机参数",
+            defaultextension=".json",
+            initialfile=default_name,
+            filetypes=[("JSON文件", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        import json as _json
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(self.data[0], f, ensure_ascii=False, indent=2)
+        messagebox.showinfo("导出完成", f"已导出：\n{path}", parent=self)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -2736,6 +2942,7 @@ class ParamsTableView(ParamsView):
                     font=("Microsoft YaHei", 9, "bold") if row_idx == 0 else None,
                     cell_meta={
                         "item": item,
+                        "editable": row_idx == 1,
                         "text": " ".join([title, item["label"], item["s1"], item.get("note", "")]),
                     }
                 )
@@ -2843,6 +3050,7 @@ class ParamsTableView(ParamsView):
                     x, y, col_w, self.ROW_H, item["s1"], fill=fill,
                     cell_meta={
                         "item": item,
+                        "editable": True,
                         "text": " ".join([group["title"], item["label"], item["s1"], item.get("note", "")]),
                     }
                 )
@@ -2939,10 +3147,71 @@ class ParamsTableView(ParamsView):
             x1, y1, x2, y2 = cell["bbox"]
             if x1 <= x <= x2 and y1 <= y <= y2:
                 item = cell.get("item")
+                if item and cell.get("editable"):
+                    self._edit_param_item(item)
+                    return
                 note = item.get("note", "") if item else ""
                 if note:
                     messagebox.showinfo("备注说明", f"{item['label']}\n\n{note}", parent=self)
                 return
+
+    def _edit_param_item(self, item):
+        path = item.get("path1")
+        if not path:
+            messagebox.showinfo("编辑提示", "该参数暂不支持编辑。", parent=self)
+            return
+        current_value = self._get_path_value(self.data[0], path)
+        new_text = simpledialog.askstring(
+            "修改整机参数",
+            f"参数：{item['label']}\n当前值：{self._fmt(current_value)}\n\n请输入新值：",
+            initialvalue=self._fmt(current_value),
+            parent=self,
+        )
+        if new_text is None:
+            return
+        new_value = self._coerce_edited_value(new_text, current_value)
+        if not messagebox.askyesno(
+            "确认修改",
+            f"确认将「{item['label']}」从：\n{self._fmt(current_value)}\n\n修改为：\n{self._fmt(new_value)}",
+            parent=self,
+        ):
+            return
+        self._set_path_value(self.data[0], path, new_value)
+        self._populate()
+
+    def _coerce_edited_value(self, text: str, old_value):
+        text = text.strip()
+        if isinstance(old_value, bool):
+            return text.lower() in ("1", "true", "yes", "y", "是")
+        if isinstance(old_value, int) and not isinstance(old_value, bool):
+            try:
+                return int(text)
+            except ValueError:
+                return old_value
+        if isinstance(old_value, float):
+            try:
+                return float(text)
+            except ValueError:
+                return old_value
+        if isinstance(old_value, (list, dict)):
+            import json as _json
+            try:
+                return _json.loads(text)
+            except Exception:
+                return old_value
+        return text
+
+    def _get_path_value(self, data, path):
+        obj = data
+        for key in path:
+            obj = obj[key]
+        return obj
+
+    def _set_path_value(self, data, path, value):
+        obj = data
+        for key in path[:-1]:
+            obj = obj[key]
+        obj[path[-1]] = value
 
 
 # ── ParamNotesDialog ─────────────────────────────────────────────────────────
@@ -3423,7 +3692,7 @@ class FA120App:
                 ("温控版本", "temp_control_version"),
             ],
             [
-                ("申请样本次数", "request_count"),
+                ("累计申请次数", "request_count"),
                 ("累计检测次数", "detect_count"),
                 ("累计开盖次数", "open_cap_count"),
                 ("日志编排数", "current_arrangement_count"),
@@ -3613,8 +3882,8 @@ class FA120App:
 
         tree_frame, self.sample_tree = self._create_tree(
             left_frame,
-            ("编排时间", "编号", "样本ID", "样本类型", "样本位置", "测试数", "开盖", "摇匀", "项目", "样本状态"),
-            widths=[80, 60, 130, 60, 60, 45, 45, 45, 100, 80],
+            ("编排时间", "编号", "样本ID", "样本类型", "样本容器", "样本位置", "测试数", "开盖", "摇匀", "项目", "样本状态"),
+            widths=[80, 60, 130, 60, 100, 60, 45, 45, 45, 100, 80],
             height=7,
         )
         tree_frame.pack(fill=tk.BOTH, expand=True)
@@ -4252,7 +4521,7 @@ class FA120App:
             # 搜索过滤（流水号、样本ID、项目）
             if search_text and not any(
                 search_text in (val or "").lower()
-                for val in [sample.serial, sample.sample_id, item_text]
+                for val in [sample.serial, sample.sample_id, sample.sample_container, item_text]
             ):
                 continue
             if sample.status == "测试完成":
@@ -4267,6 +4536,7 @@ class FA120App:
                 sample.serial,
                 sample.sample_id,
                 sample.sample_type,
+                sample.sample_container,
                 self.parser._plus_one_rack_pos(sample.rack_pos),
                 sample.test_count,
                 "是" if sample.cap_open else "否",
