@@ -1577,7 +1577,9 @@ class TableView(tk.Frame):
         if level1 == "E05":
             return self._volume_result_suffix(group, "5.8")
         if level1 == "E08":
-            return self._volume_result_suffix(group, "5.8")
+            return self._volume_result_suffix(group, "4.7")
+        if level1 == "E13":
+            return self._volume_result_suffix(group, "3.7")
         if level1 == "E09":
             return self._volume_result_suffix(group, "3.7")
         return ""
@@ -1585,7 +1587,7 @@ class TableView(tk.Frame):
     @staticmethod
     def _volume_result_suffix(group: list[Action], level2_prefix: str) -> str:
         for act in group:
-            if act.level2.startswith(level2_prefix):
+            if act.component == "ADP" and act.level2.startswith(level2_prefix):
                 volume = abs(act.end_pos - act.start_pos) / 10
                 volume_text = str(int(volume)) if float(volume).is_integer() else f"{volume:.1f}"
                 return f"{volume_text}uL"

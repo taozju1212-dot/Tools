@@ -13,7 +13,7 @@ from motion_calculator.calculations import (
     tvmax_to_register,
     velocity_to_register,
 )
-from motion_calculator.models import Axis, CompositeAction, CompositeStep, DistanceCase, MotionCase, MotionParams, TProfileCase
+from motion_calculator.models import Axis, AxisPoint, CompositeAction, CompositeStep, CompositeStepItem, DistanceCase, MotionCase, MotionParams, TProfileCase
 from motion_calculator.models import AppState, MotionAction
 from motion_calculator.io_excel import export_excel
 from motion_calculator.project_io import load_project, save_project
@@ -213,6 +213,71 @@ def test_composite_motion_sums_serial_and_maxes_parallel():
 
     assert result.steps[0].total_time == max(x_time, y_time)
     assert abs(result.total_time - (max(x_time, y_time) + 0.25)) < 1e-9
+
+
+def test_legacy_distances_migrate_to_axis_points():
+    axis = Axis(name="X")
+    distance = DistanceCase(distance=125, note="取料位")
+    state = AppState(axes=[axis], actions=[MotionAction(axis_id=axis.id, distances=[distance])])
+    state.migrate_coordinate_points()
+
+    migrated = state.actions[0].distances[0]
+    assert len(state.axes[0].points) == 2
+    assert state.axes[0].points[0].position_mm == 0
+    assert migrated.start_point_id == state.axes[0].points[0].id
+    assert migrated.end_point_id == state.axes[0].points[1].id
+    assert migrated.distance == 125
+
+
+def test_signed_coordinate_distance_uses_absolute_motion_time():
+    zero = AxisPoint(name="零位", position_mm=0)
+    negative = AxisPoint(name="负位", position_mm=-100)
+    axis = Axis(name="X", points=[zero, negative])
+    params = MotionParams(vmax=300, a1=1200, a2=1200, amax=1200, dmax=1200, d2=1200, d1=1200, v1=100, v2=200)
+    distance = DistanceCase(distance=-100, note="反向", start_point_id=zero.id, end_point_id=negative.id)
+    action = MotionAction(axis_id=axis.id, params=params, distances=[distance])
+    step = CompositeStep(name="STEP1", items=[CompositeStepItem(kind="motion", axis_id=axis.id, distance_id=distance.id)])
+
+    result = calculate_composite_motion([axis], [action], [step])
+
+    assert distance_to_register(axis, distance.distance).value < 0
+    assert result.total_time == calculate_motion(axis, 16_000_000, params, DistanceCase(distance=100)).total_time
+    assert result.steps[0].move_results[0].distance == -100
+
+
+def test_composite_step_items_support_delay_after_parallel_motion():
+    axis = Axis(name="X")
+    params = MotionParams(vmax=300, a1=1200, a2=1200, amax=1200, dmax=1200, d2=1200, d1=1200, v1=100, v2=200)
+    distance = DistanceCase(distance=100, note="P1")
+    action = MotionAction(axis_id=axis.id, params=params, distances=[distance])
+    motion_time = calculate_motion(axis, 16_000_000, params, distance).total_time
+    step = CompositeStep(
+        name="STEP1",
+        items=[
+            CompositeStepItem(kind="motion", axis_id=axis.id, distance_id=distance.id),
+            CompositeStepItem(kind="delay", delay_ms=200),
+        ],
+    )
+
+    result = calculate_composite_motion([axis], [action], [step])
+
+    assert abs(result.steps[0].total_time - (motion_time + 0.2)) < 1e-9
+    assert result.steps[0].delay_time == 0.2
+
+
+def test_timer_axis_secondary_action_participates_in_parallel_step_time():
+    timer = Axis(name="Timer", mechanism_type="timer")
+    timer_case = DistanceCase(number="T1", duration_s=0.75, note="等待")
+    timer_action = MotionAction(axis_id=timer.id, distances=[timer_case])
+    step = CompositeStep(
+        name="STEP1",
+        items=[CompositeStepItem(kind="motion", axis_id=timer.id, distance_id=timer_case.id)],
+    )
+
+    result = calculate_composite_motion([timer], [timer_action], [step])
+
+    assert result.total_time == 0.75
+    assert result.steps[0].move_results[0].kind == "timer"
 
 
 def test_excel_export_supports_current_app_state(tmp_path):

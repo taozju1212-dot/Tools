@@ -24,7 +24,7 @@ from .calculations import (
     recommend_for_target_time,
     velocity_to_register,
 )
-from .models import AppState, Axis, CompositeAction, CompositeStep, DistanceCase, MotionAction, MotionParams, new_id
+from .models import AppState, Axis, AxisPoint, CompositeAction, CompositeStep, CompositeStepItem, DistanceCase, MotionAction, MotionParams, new_id
 from .io_excel import export_excel
 from .project_io import load_project, save_project
 
@@ -36,6 +36,7 @@ MECHANISM_LABELS = {
     "步进直线": "linear_belt",
     "步进旋转": "rotary",
     "步进丝杆": "leadscrew",
+    "定时器": "timer",
 }
 MECHANISM_NAMES = {value: key for key, value in MECHANISM_LABELS.items()}
 FIELD_LABELS = {
@@ -110,8 +111,12 @@ class ProjectDialog(simpledialog.Dialog):
 
 
 class AxisDialog(simpledialog.Dialog):
-    def __init__(self, parent: tk.Widget, axis: Axis | None = None) -> None:
+    def __init__(self, parent: tk.Widget, axis: Axis | None = None, referenced_point_ids: set[str] | None = None) -> None:
         self.axis = axis
+        self.referenced_point_ids = referenced_point_ids or set()
+        self.points: list[AxisPoint] = [AxisPoint(id=p.id, name=p.name, position_mm=p.position_mm) for p in (axis.points if axis else [])]
+        if not self.points:
+            self.points.append(AxisPoint(name="零位", position_mm=0.0))
         super().__init__(parent, "运动轴")
 
     def body(self, master: tk.Widget) -> tk.Widget:
@@ -119,6 +124,7 @@ class AxisDialog(simpledialog.Dialog):
         self.vars: dict[str, tk.StringVar] = {}
         self.rows: dict[str, tuple[ttk.Label, tk.Widget]] = {}
         fields = [
+            ("number", "编号", axis.number),
             ("name", "名称", axis.name),
             ("mechanism_type", "结构类型", MECHANISM_NAMES.get(axis.normalized_type(), "步进直线")),
             ("motor_step_angle", "步距角", axis.motor_step_angle),
@@ -146,20 +152,92 @@ class AxisDialog(simpledialog.Dialog):
             self.rows[key] = (label_widget, widget)
         self.help_label = ttk.Label(master, text="", foreground="#666")
         self.help_label.grid(row=len(fields), column=0, columnspan=2, sticky="w", padx=6, pady=4)
+        self.point_box = ttk.LabelFrame(master, text="坐标点")
+        self.point_box.grid(row=0, column=2, rowspan=len(fields) + 1, sticky="nsew", padx=(14, 6), pady=4)
+        self.point_box.columnconfigure(0, weight=1)
+        self.point_box.rowconfigure(0, weight=1)
+        self.point_tree = ttk.Treeview(self.point_box, columns=("name", "position"), show="headings", height=10)
+        self.point_tree.heading("name", text="名称")
+        self.point_tree.heading("position", text="位置 mm")
+        self.point_tree.column("name", width=130, anchor="center")
+        self.point_tree.column("position", width=110, anchor="center")
+        self.point_tree.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=6, pady=6)
+        self.point_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_point_selection())
+        self.point_name_var = tk.StringVar(value="")
+        self.point_pos_var = tk.StringVar(value="")
+        ttk.Entry(self.point_box, textvariable=self.point_name_var, width=16).grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Entry(self.point_box, textvariable=self.point_pos_var, width=12).grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 6))
+        point_buttons = ttk.Frame(self.point_box)
+        point_buttons.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
+        ttk.Button(point_buttons, text="新增", command=self._add_point).pack(side="left", padx=(0, 4))
+        ttk.Button(point_buttons, text="更新", command=self._update_point).pack(side="left", padx=4)
+        ttk.Button(point_buttons, text="删除", command=self._delete_point).pack(side="left", padx=4)
+        self._refresh_points()
         self.update_visible_fields()
         return master
+
+    def _refresh_points(self) -> None:
+        for item in self.point_tree.get_children():
+            self.point_tree.delete(item)
+        for point in self.points:
+            self.point_tree.insert("", tk.END, iid=point.id, values=(point.name, _fmt(point.position_mm)))
+
+    def _load_point_selection(self) -> None:
+        selection = self.point_tree.selection()
+        if not selection:
+            return
+        point = next((item for item in self.points if item.id == selection[0]), None)
+        if point:
+            self.point_name_var.set(point.name)
+            self.point_pos_var.set(_fmt(point.position_mm))
+
+    def _add_point(self) -> None:
+        name = self.point_name_var.get().strip() or f"坐标{len(self.points)}"
+        self.points.append(AxisPoint(name=name, position_mm=_float(self.point_pos_var.get(), 0.0)))
+        self._refresh_points()
+
+    def _update_point(self) -> None:
+        selection = self.point_tree.selection()
+        if not selection:
+            return
+        point = next((item for item in self.points if item.id == selection[0]), None)
+        if not point:
+            return
+        point.name = self.point_name_var.get().strip() or point.name
+        point.position_mm = _float(self.point_pos_var.get(), point.position_mm)
+        self._refresh_points()
+        self.point_tree.selection_set(point.id)
+
+    def _delete_point(self) -> None:
+        selection = self.point_tree.selection()
+        if not selection:
+            return
+        point_id = selection[0]
+        point = next((item for item in self.points if item.id == point_id), None)
+        if not point:
+            return
+        if point_id in self.referenced_point_ids:
+            messagebox.showwarning("坐标点", "该坐标点已被距离引用，请先删除相关距离。", parent=self)
+            return
+        if abs(point.position_mm) < 1e-12:
+            messagebox.showwarning("坐标点", "零位不能删除。", parent=self)
+            return
+        self.points = [item for item in self.points if item.id != point_id]
+        self._refresh_points()
 
     def update_visible_fields(self) -> None:
         mechanism = MECHANISM_LABELS.get(self.vars["mechanism_type"].get(), "linear_belt")
         visible = {
-            "linear_belt": {"name", "mechanism_type", "motor_step_angle", "microstep", "gear_ratio", "pulley_teeth", "pulley_pitch_mm"},
-            "rotary": {"name", "mechanism_type", "motor_step_angle", "microstep", "gear_ratio"},
-            "leadscrew": {"name", "mechanism_type", "motor_step_angle", "microstep", "lead_mm_per_rev"},
+            "linear_belt": {"number", "name", "mechanism_type", "motor_step_angle", "microstep", "gear_ratio", "pulley_teeth", "pulley_pitch_mm"},
+            "rotary": {"number", "name", "mechanism_type", "motor_step_angle", "microstep", "gear_ratio"},
+            "leadscrew": {"number", "name", "mechanism_type", "motor_step_angle", "microstep", "lead_mm_per_rev"},
+            "timer": {"number", "name", "mechanism_type"},
         }[mechanism]
         help_text = {
             "linear_belt": "步进直线：步距角、微步、减速比、同步轮齿数、同步轮齿距。",
             "rotary": "步进旋转：步距角、减速比、微步。",
             "leadscrew": "步进丝杆：步距角、丝杆导程、微步。",
+            "timer": "定时器：无电机参数和坐标点，二级动作只记录运动时间。",
         }[mechanism]
         for key, (label, widget) in self.rows.items():
             if key in visible:
@@ -169,10 +247,15 @@ class AxisDialog(simpledialog.Dialog):
                 label.grid_remove()
                 widget.grid_remove()
         self.help_label.configure(text=help_text)
+        if mechanism == "timer":
+            self.point_box.grid_remove()
+        else:
+            self.point_box.grid()
 
     def apply(self) -> None:
         self.result = Axis(
             id=self.axis.id if self.axis else new_id(),
+            number=self.vars["number"].get().strip(),
             name=self.vars["name"].get().strip() or "Axis",
             mechanism_type=MECHANISM_LABELS.get(self.vars["mechanism_type"].get(), "linear_belt"),
             motor_step_angle=_float(self.vars["motor_step_angle"].get(), 1.8),
@@ -181,6 +264,7 @@ class AxisDialog(simpledialog.Dialog):
             pulley_teeth=_int(self.vars["pulley_teeth"].get(), 20),
             pulley_pitch_mm=_float(self.vars["pulley_pitch_mm"].get(), 2.0),
             lead_mm_per_rev=_float(self.vars["lead_mm_per_rev"].get(), 6.35),
+            points=[] if MECHANISM_LABELS.get(self.vars["mechanism_type"].get(), "linear_belt") == "timer" else self.points,
         )
 
 
@@ -200,7 +284,9 @@ class MotionCalculatorApp(tk.Tk):
         self.param_reg_vars: dict[str, tk.StringVar] = {}
         self.param_reg_hint_vars: dict[str, tk.StringVar] = {}
         self.param_reg_entries: dict[str, ttk.Entry] = {}
+        self.param_input_widgets: list[tk.Widget] = []
         self.param_reg_hint_labels: dict[str, tk.Label] = {}
+        self.recalculate_button: ttk.Button | None = None
         self.target_vars: dict[str, tk.StringVar] = {}
         self.target_result_vars: dict[str, tk.StringVar] = {}
         self.target_apply_button: ttk.Button | None = None
@@ -210,11 +296,14 @@ class MotionCalculatorApp(tk.Tk):
         self.composite_name_var = tk.StringVar(value="")
         self._refreshing_composite_action_list = False
         self.composite_editor: ttk.Frame | None = None
+        self.current_composite_step_id = ""
+        self.current_composite_item_id = ""
         self.composite_total_var = tk.StringVar(value="")
         self.composite_status_var = tk.StringVar(value="")
         self.composite_vars: dict[str, dict[str, tk.StringVar]] = {}
         self._composite_option_by_id: dict[str, str] = {}
         self._composite_id_by_option: dict[str, str] = {}
+        self._composite_distance_id_by_axis_number: dict[tuple[str, str], str] = {}
         self._composite_total_by_id: dict[str, float | None] = {}
         self._last_target_params: MotionParams | None = None
         self._last_target_result: MotionResult | None = None
@@ -259,6 +348,7 @@ class MotionCalculatorApp(tk.Tk):
         self._build_center()
         self._build_detail_panel()
         self._build_chart()
+        self._on_notebook_tab_changed()
         self.refresh_all()
 
     def _configure_styles(self) -> None:
@@ -304,10 +394,14 @@ class MotionCalculatorApp(tk.Tk):
     def _build_axis_panel(self) -> None:
         panel = ttk.Frame(self, padding=10)
         panel.grid(row=0, column=0, sticky="nsw")
-        ttk.Label(panel, text="运动轴", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        self.axis_list = tk.Listbox(panel, width=28, height=8, font=("Segoe UI", 13), activestyle="dotbox")
+        ttk.Label(panel, text="部件列表", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        self.axis_list = ttk.Treeview(panel, columns=("number", "name"), show="headings", height=8)
+        self.axis_list.heading("number", text="编号")
+        self.axis_list.heading("name", text="名称")
+        self.axis_list.column("number", width=70, anchor="center")
+        self.axis_list.column("name", width=170, anchor="center")
         self.axis_list.pack(fill="both", expand=True, pady=8)
-        self.axis_list.bind("<<ListboxSelect>>", lambda _e: self.on_axis_select())
+        self.axis_list.bind("<<TreeviewSelect>>", lambda _e: self.on_axis_select())
         buttons = ttk.Frame(panel)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="新增", command=self.add_axis).pack(side="left", padx=2)
@@ -326,15 +420,28 @@ class MotionCalculatorApp(tk.Tk):
         ttk.Label(center, textvariable=self.center_axis_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.notebook = ttk.Notebook(center)
         self.notebook.grid(row=1, column=0, sticky="nsew")
+        self.notebook.bind("<<NotebookTabChanged>>", lambda _e: self._on_notebook_tab_changed())
         self.action_tab = ttk.Frame(self.notebook, padding=8)
         self.composite_tab = ttk.Frame(self.notebook, padding=8)
         self.target_tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(self.action_tab, text="单轴时间计算")
-        self.notebook.add(self.composite_tab, text="组合动作时间计算")
+        self.notebook.add(self.action_tab, text="二级动作编辑")
+        self.notebook.add(self.composite_tab, text="一级动作编辑")
         self.notebook.add(self.target_tab, text="运动速度反算")
         self._build_action_tab()
         self._build_composite_tab()
         self._build_target_tab()
+
+    def _on_notebook_tab_changed(self) -> None:
+        if not hasattr(self, "notebook") or not hasattr(self, "detail_panel"):
+            return
+        selected = self.notebook.select()
+        show_detail = selected == str(self.action_tab)
+        if show_detail:
+            self.columnconfigure(2, weight=0, minsize=420)
+            self.detail_panel.grid(row=0, column=2, sticky="nsew")
+        else:
+            self.detail_panel.grid_remove()
+            self.columnconfigure(2, weight=0, minsize=0)
 
     def _build_action_tab(self) -> None:
         self.action_tab.columnconfigure(0, weight=1)
@@ -382,6 +489,7 @@ class MotionCalculatorApp(tk.Tk):
             self.param_phys_vars[key] = phys_var
             self.param_reg_hint_vars[key] = hint_var
             reg = ttk.Entry(grid, textvariable=reg_var, width=10)
+            self.param_input_widgets.append(reg)
             reg.grid(row=1, column=ui_col, padx=2, pady=2)
             hint = tk.Label(grid, textvariable=hint_var, foreground="#999", background="white", font=("Segoe UI", 9))
             hint.place(in_=reg, relx=1.0, x=-5, rely=0.5, anchor="e")
@@ -390,6 +498,7 @@ class MotionCalculatorApp(tk.Tk):
             self.param_reg_hint_labels[key] = hint
             motor = ttk.Entry(grid, textvariable=motor_var, width=10)
             phys = ttk.Entry(grid, textvariable=phys_var, width=10)
+            self.param_input_widgets.extend([motor, phys])
             motor.grid(row=2, column=ui_col, padx=2, pady=2)
             phys.grid(row=3, column=ui_col, padx=2, pady=2)
             reg.bind("<FocusIn>", lambda _e, field=key: self._update_reg_hint(field))
@@ -398,9 +507,10 @@ class MotionCalculatorApp(tk.Tk):
             reg.bind("<Return>", lambda _e, field=key: self._on_reg_enter(field))
             motor.bind("<FocusOut>", lambda _e, field=key: self.sync_param_from_motor(field))
             phys.bind("<FocusOut>", lambda _e, field=key: self.sync_param_from_physical(field))
-        ttk.Button(right, text="重新计算", command=self.recalculate_all).grid(row=2, column=0, sticky="w", pady=4)
+        self.recalculate_button = ttk.Button(right, text="重新计算", command=self.recalculate_all)
+        self.recalculate_button.grid(row=2, column=0, sticky="w", pady=4)
 
-        distance_box = ttk.LabelFrame(right, text="距离列表")
+        distance_box = ttk.LabelFrame(right, text="二级动作列表")
         distance_box.grid(row=3, column=0, sticky="nsew", pady=6)
         distance_box.columnconfigure(0, weight=1)
         distance_box.rowconfigure(1, weight=1)
@@ -409,28 +519,29 @@ class MotionCalculatorApp(tk.Tk):
         self.distance_mm_var = tk.StringVar(value="")
         self.distance_reg_var = tk.StringVar(value="")
         self.distance_note_var = tk.StringVar(value="")
-        ttk.Label(controls, text="mm").pack(side="left")
-        mm_entry = ttk.Entry(controls, textvariable=self.distance_mm_var, width=10)
-        mm_entry.pack(side="left", padx=3)
-        mm_entry.bind("<FocusOut>", lambda _e: self._auto_sync_distance_from_mm())
-        ttk.Label(controls, text="X_TARGET").pack(side="left")
-        reg_entry = ttk.Entry(controls, textvariable=self.distance_reg_var, width=12)
-        reg_entry.pack(side="left", padx=3)
-        reg_entry.bind("<FocusOut>", lambda _e: self._auto_sync_distance_from_reg())
+        self.distance_start_var = tk.StringVar(value="")
+        self.distance_end_var = tk.StringVar(value="")
         ttk.Label(controls, text="备注").pack(side="left")
         ttk.Entry(controls, textvariable=self.distance_note_var, width=18).pack(side="left", padx=3)
+        ttk.Label(controls, text="起始点").pack(side="left")
+        self.distance_start_combo = ttk.Combobox(controls, textvariable=self.distance_start_var, state="readonly", width=16)
+        self.distance_start_combo.pack(side="left", padx=3)
+        ttk.Label(controls, text="结束点").pack(side="left")
+        self.distance_end_combo = ttk.Combobox(controls, textvariable=self.distance_end_var, state="readonly", width=16)
+        self.distance_end_combo.pack(side="left", padx=3)
         ttk.Button(controls, text="添加距离", command=self.add_distance).pack(side="left", padx=5)
         ttk.Button(controls, text="删除距离", command=self.delete_distance).pack(side="left", padx=5)
 
-        columns = ("distance", "xtarget", "total", "note")
+        columns = ("number", "start", "end", "distance", "xtarget", "total", "note")
         self.distance_tree = ttk.Treeview(distance_box, columns=columns, show="headings", height=8)
-        headers = {"distance": "距离 mm", "xtarget": "X_TARGET", "total": "运动时间 s", "note": "备注"}
+        headers = {"number": "动作编号", "start": "起始点", "end": "结束点", "distance": "距离 mm", "xtarget": "X_TARGET", "total": "运动时间 s", "note": "运动说明"}
         for col in columns:
             self.distance_tree.heading(col, text=headers[col])
-            width = 180 if col == "note" else 120
+            width = 180 if col == "note" else 100 if col == "number" else 120
             self.distance_tree.column(col, width=width, anchor="center")
         self.distance_tree.grid(row=1, column=0, sticky="nsew")
         self.distance_tree.bind("<<TreeviewSelect>>", lambda _e: self.on_distance_select())
+        self.distance_tree.bind("<Double-1>", self.edit_distance_cell)
 
     def _build_composite_tab(self) -> None:
         self.composite_tab.columnconfigure(0, weight=0, minsize=230)
@@ -439,7 +550,7 @@ class MotionCalculatorApp(tk.Tk):
 
         left = ttk.Frame(self.composite_tab)
         left.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
-        ttk.Label(left, text="组合动作", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(left, text="一级动作列表", font=("Segoe UI", 13, "bold")).pack(anchor="w")
         self.composite_action_list = ttk.Treeview(
             left,
             columns=("number", "name", "total"),
@@ -465,40 +576,36 @@ class MotionCalculatorApp(tk.Tk):
         right = ttk.Frame(self.composite_tab)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(2, weight=1)
+        right.rowconfigure(1, weight=1)
 
         name_bar = ttk.Frame(right)
-        name_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        name_bar.columnconfigure(3, weight=1)
-        ttk.Label(name_bar, text="编号").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        name_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        name_bar.columnconfigure(7, weight=1)
+        ttk.Label(name_bar, text="动作流程", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 16))
+        ttk.Label(name_bar, text="编号").grid(row=0, column=1, sticky="w", padx=(0, 6))
         number_entry = ttk.Entry(name_bar, textvariable=self.composite_number_var, width=12)
-        number_entry.grid(row=0, column=1, sticky="w", padx=(0, 12))
+        number_entry.grid(row=0, column=2, sticky="w", padx=(0, 12))
         number_entry.bind("<FocusOut>", lambda _e: self.rename_current_composite_action())
         number_entry.bind("<Return>", lambda _e: self.rename_current_composite_action())
-        ttk.Label(name_bar, text="名称").grid(row=0, column=2, sticky="w", padx=(0, 6))
-        name_entry = ttk.Entry(name_bar, textvariable=self.composite_name_var, width=32)
-        name_entry.grid(row=0, column=3, sticky="ew")
+        ttk.Label(name_bar, text="名称").grid(row=0, column=3, sticky="w", padx=(0, 6))
+        name_entry = ttk.Entry(name_bar, textvariable=self.composite_name_var, width=12)
+        name_entry.grid(row=0, column=4, sticky="w")
         name_entry.bind("<FocusOut>", lambda _e: self.rename_current_composite_action())
         name_entry.bind("<Return>", lambda _e: self.rename_current_composite_action())
-
-        top = ttk.Frame(right)
-        top.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(top, text="增加 STEP", command=self.add_composite_step).pack(side="left", padx=(0, 5))
-        ttk.Button(top, text="删除选中 STEP", command=self.delete_composite_step).pack(side="left", padx=5)
-        ttk.Label(top, textvariable=self.composite_total_var, font=("Segoe UI", 12, "bold")).pack(side="left", padx=16)
-        ttk.Label(top, textvariable=self.composite_status_var, foreground="#777").pack(side="left", padx=8)
+        ttk.Label(name_bar, textvariable=self.composite_total_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=5, sticky="w", padx=(18, 8))
+        ttk.Label(name_bar, textvariable=self.composite_status_var, foreground="#777").grid(row=0, column=6, sticky="w")
 
         body = ttk.Frame(right)
-        body.grid(row=2, column=0, sticky="nsew")
+        body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
-        body.rowconfigure(1, weight=1)
+        body.rowconfigure(1, weight=0)
 
-        editor_box = ttk.LabelFrame(body, text="组合动作编辑：每一行串行执行，同一行内动作1/动作2/动作3并行执行")
+        editor_box = ttk.Frame(body)
         editor_box.grid(row=0, column=0, sticky="nsew")
         editor_box.columnconfigure(0, weight=1)
         editor_box.rowconfigure(0, weight=1)
-        editor_canvas = tk.Canvas(editor_box, height=190, highlightthickness=0)
+        editor_canvas = tk.Canvas(editor_box, height=360, highlightthickness=0)
         editor_y = ttk.Scrollbar(editor_box, orient="vertical", command=editor_canvas.yview)
         editor_x = ttk.Scrollbar(editor_box, orient="horizontal", command=editor_canvas.xview)
         editor_canvas.configure(yscrollcommand=editor_y.set, xscrollcommand=editor_x.set)
@@ -517,7 +624,7 @@ class MotionCalculatorApp(tk.Tk):
             self.composite_result_tree.heading(col, text=headers[col])
             width = 220 if col == "motion" else 160
             self.composite_result_tree.column(col, width=width, anchor="center")
-        self.composite_result_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        # Result rows are now shown in the editable STEP table above.
         self.composite_result_tree.bind("<Double-1>", self.edit_composite_step_note)
 
         self.refresh_composite_tab()
@@ -617,19 +724,68 @@ class MotionCalculatorApp(tk.Tk):
         self.current_composite_action_id = current.id
         self.refresh_composite_tab()
 
-    def _composite_distance_options(self) -> list[str]:
+    def _composite_axis_options(self) -> list[str]:
+        self._composite_axis_id_by_option = {"延时": "__delay__"}
+        self._composite_axis_option_by_id = {}
+        options = ["", "延时"]
+        for axis in self.state_data.axes:
+            label = axis.name
+            self._composite_axis_id_by_option[label] = axis.id
+            self._composite_axis_option_by_id[axis.id] = label
+            options.append(label)
+        return options
+
+    def _composite_distance_options(self, axis_id: str | None = None) -> list[str]:
         options = [""]
         for action in self.state_data.actions:
             axis = self.get_axis(action.axis_id)
             if not axis:
                 continue
+            if axis_id and axis.id != axis_id:
+                continue
             for idx, distance in enumerate(action.distances, start=1):
                 note = distance.note.strip() or f"动作{idx}"
-                label = f"{axis.name} / {note} / {_fmt(distance.distance)}"
+                label = f"{note} / {_fmt(distance.duration_s)} s" if self._is_timer_axis(axis) else f"{note} / {_fmt(distance.distance)} mm"
                 self._composite_option_by_id[distance.id] = label
                 self._composite_id_by_option[label] = distance.id
                 options.append(label)
         return options
+
+    def _secondary_action_options(self, axis_id: str) -> list[str]:
+        options = [""]
+        action = next((item for item in self.state_data.actions if item.axis_id == axis_id), None)
+        if not action:
+            return options
+        for idx, distance in enumerate(action.distances, start=1):
+            label = distance.number.strip() or str(idx)
+            self._composite_distance_id_by_axis_number[(axis_id, label)] = distance.id
+            options.append(label)
+        return options
+
+    def _secondary_action_label(self, axis_id: str, distance_id: str) -> str:
+        action = next((item for item in self.state_data.actions if item.axis_id == axis_id), None)
+        if not action:
+            return ""
+        for idx, distance in enumerate(action.distances, start=1):
+            if distance.id == distance_id:
+                return distance.number.strip() or str(idx)
+        return ""
+
+    def _distance_for_item(self, axis_id: str, distance_id: str) -> DistanceCase | None:
+        action = next((item for item in self.state_data.actions if item.axis_id == axis_id), None)
+        if not action:
+            return None
+        return next((item for item in action.distances if item.id == distance_id), None)
+
+    def _flow_distance_text(self, axis: Axis | None, distance: DistanceCase | None, item: CompositeStepItem) -> str:
+        if item.kind == "delay":
+            return _fmt(item.delay_ms / 1000.0)
+        if not axis or not distance:
+            return ""
+        return _fmt(distance.duration_s) if self._is_timer_axis(axis) else _fmt(distance.distance)
+
+    def _flow_point_text(self, axis: Axis | None, point_id: str) -> str:
+        return self._point_name(axis, point_id) if axis else ""
 
     def refresh_composite_tab(self) -> None:
         if not self.composite_editor:
@@ -641,83 +797,212 @@ class MotionCalculatorApp(tk.Tk):
         self.composite_vars = {}
         self._composite_option_by_id = {}
         self._composite_id_by_option = {}
-        distance_options = self._composite_distance_options()
+        self._composite_distance_id_by_axis_number = {}
+        axis_options = self._composite_axis_options()
+        self._composite_distance_options()
+        try:
+            result = calculate_composite_motion(self.state_data.axes, self.state_data.actions, current_action.steps if current_action else [], self.state_data.fclk_hz)
+            result_by_item = {move.step_item_id: move for step_result in result.steps for move in step_result.move_results}
+            result_by_step = {step_result.step.id: step_result for step_result in result.steps}
+            self.composite_total_var.set(f"动作时间：{_fmt(result.total_time)} s")
+            self.composite_status_var.set("")
+        except Exception as exc:
+            result_by_item = {}
+            result_by_step = {}
+            self.composite_total_var.set("")
+            self.composite_status_var.set(str(exc))
 
-        headers = ["STEP", "备注", "延时 ms", "动作1", "动作2", "动作3"]
+        headers = ["序号", "备注", "部件", "二级动作编号", "距离(mm)或时间(s)", "起始点", "结束点", "运动说明", "动作时间", "流程时间", "流程新增", "动作新增"]
         for col, text in enumerate(headers):
             ttk.Label(self.composite_editor, text=text, font=("Segoe UI", 11, "bold")).grid(row=0, column=col, sticky="w", padx=4, pady=4)
 
         steps = current_action.steps if current_action else []
-        for row, step in enumerate(steps, start=1):
-            for key in ("action1_distance_id", "action2_distance_id", "action3_distance_id"):
-                if getattr(step, key) and getattr(step, key) not in self._composite_option_by_id:
-                    setattr(step, key, "")
-            ttk.Label(self.composite_editor, text=step.name).grid(row=row, column=0, sticky="w", padx=4, pady=3)
-            vars_for_step = {
-                "note": tk.StringVar(value=step.note),
-                "delay_ms": tk.StringVar(value=_fmt(step.delay_ms)),
-                "action1_distance_id": tk.StringVar(value=self._composite_option_by_id.get(step.action1_distance_id, "")),
-                "action2_distance_id": tk.StringVar(value=self._composite_option_by_id.get(step.action2_distance_id, "")),
-                "action3_distance_id": tk.StringVar(value=self._composite_option_by_id.get(step.action3_distance_id, "")),
-            }
-            self.composite_vars[step.id] = vars_for_step
-            note = ttk.Entry(self.composite_editor, textvariable=vars_for_step["note"], width=18)
-            note.grid(row=row, column=1, sticky="ew", padx=4, pady=3)
+        row = 1
+        if not steps:
+            ttk.Label(self.composite_editor, text="暂无动作流程").grid(row=row, column=0, sticky="w", padx=4, pady=8)
+            ttk.Button(self.composite_editor, text="+", width=2, command=self.add_composite_step).grid(row=row, column=10, sticky="w", padx=4, pady=8)
+            self.composite_editor.columnconfigure(1, weight=1)
+            self.refresh_composite_action_list()
+            return
+        for step_index, step in enumerate(steps, start=1):
+            if not step.items:
+                step.items.append(CompositeStepItem(kind="motion"))
+            row_span = max(1, len(step.items))
+            step_label = ttk.Label(self.composite_editor, text=str(step_index))
+            step_label.grid(row=row, column=0, rowspan=row_span, sticky="nsew", padx=4, pady=3)
+            step_label.bind("<Button-1>", lambda _e, step_id=step.id: self._select_composite(step_id, ""))
+            note_var = tk.StringVar(value=step.note)
+            note = ttk.Entry(self.composite_editor, textvariable=note_var, width=18)
+            note.grid(row=row, column=1, rowspan=row_span, sticky="nsew", padx=4, pady=3)
             note.bind("<FocusOut>", lambda _e, step_id=step.id: self.save_composite_step(step_id))
             note.bind("<Return>", lambda _e, step_id=step.id: self.save_composite_step(step_id))
-            delay = ttk.Entry(self.composite_editor, textvariable=vars_for_step["delay_ms"], width=10)
-            delay.grid(row=row, column=2, sticky="ew", padx=4, pady=3)
-            delay.bind("<FocusOut>", lambda _e, step_id=step.id: self.save_composite_step(step_id))
-            for col, key, options in [
-                (3, "action1_distance_id", distance_options),
-                (4, "action2_distance_id", distance_options),
-                (5, "action3_distance_id", distance_options),
-            ]:
-                combo = ttk.Combobox(self.composite_editor, textvariable=vars_for_step[key], values=options, state="readonly", width=28)
-                combo.grid(row=row, column=col, sticky="ew", padx=4, pady=3)
-                combo.bind("<<ComboboxSelected>>", lambda _e, step_id=step.id: self.save_composite_step(step_id))
+            self.composite_vars[step.id] = {"note": note_var}
+            step_total = result_by_step.get(step.id)
+            ttk.Label(self.composite_editor, text=_fmt(step_total.total_time) if step_total else "").grid(row=row, column=9, rowspan=row_span, sticky="nsew", padx=4, pady=3)
+            step_ops = ttk.Frame(self.composite_editor)
+            step_ops.grid(row=row, column=10, rowspan=row_span, sticky="nsew", padx=4, pady=3)
+            ttk.Button(step_ops, text="+", width=2, command=lambda step_id=step.id: self.add_composite_step_after(step_id)).pack(side="left", padx=(0, 2))
+            ttk.Button(step_ops, text="-", width=2, command=lambda step_id=step.id: self.delete_composite_step_by_id(step_id)).pack(side="left")
+            for item in step.items:
+                axis_var = tk.StringVar(value="延时" if item.kind == "delay" else self._composite_axis_option_by_id.get(item.axis_id, ""))
+                selected_axis_id = self._composite_axis_id_by_option.get(axis_var.get(), "")
+                number_var = tk.StringVar(value="" if item.kind == "delay" else self._secondary_action_label(selected_axis_id, item.distance_id))
+                value_var = tk.StringVar(value=_fmt(item.delay_ms / 1000.0) if item.kind == "delay" else number_var.get())
+                self.composite_vars[item.id] = {"axis": axis_var, "number": number_var, "value": value_var, "step_id": tk.StringVar(value=step.id)}
+                axis_combo = ttk.Combobox(self.composite_editor, textvariable=axis_var, values=axis_options, state="readonly", width=16)
+                axis_combo.grid(row=row, column=2, sticky="ew", padx=4, pady=3)
+                axis_combo.bind("<<ComboboxSelected>>", lambda _e, step_id=step.id, item_id=item.id: self.save_composite_step(step_id, refresh=True, selected_item_id=item_id))
+                axis = self.get_axis(selected_axis_id)
+                distance = self._distance_for_item(selected_axis_id, item.distance_id)
+                if axis_var.get() == "延时":
+                    number_widget = ttk.Entry(self.composite_editor, textvariable=value_var, width=10)
+                    number_widget.bind("<FocusOut>", lambda _e, step_id=step.id: self.save_composite_step(step_id, refresh=True))
+                    display_value = value_var.get()
+                else:
+                    number_widget = ttk.Combobox(self.composite_editor, textvariable=number_var, values=self._secondary_action_options(selected_axis_id), state="readonly", width=10)
+                    number_widget.bind("<<ComboboxSelected>>", lambda _e, step_id=step.id: self.save_composite_step(step_id, refresh=True))
+                    display_value = self._flow_distance_text(axis, distance, item)
+                number_widget.grid(row=row, column=3, sticky="ew", padx=4, pady=3)
+                ttk.Label(self.composite_editor, text=display_value).grid(row=row, column=4, sticky="ew", padx=4, pady=3)
+                ttk.Label(self.composite_editor, text="" if self._is_timer_axis(axis) else self._flow_point_text(axis, distance.start_point_id if distance else "")).grid(row=row, column=5, sticky="ew", padx=4, pady=3)
+                ttk.Label(self.composite_editor, text="" if self._is_timer_axis(axis) else self._flow_point_text(axis, distance.end_point_id if distance else "")).grid(row=row, column=6, sticky="ew", padx=4, pady=3)
+                ttk.Label(self.composite_editor, text=distance.note if distance else "").grid(row=row, column=7, sticky="ew", padx=4, pady=3)
+                move = result_by_item.get(item.id)
+                ttk.Label(self.composite_editor, text=_fmt(move.total_time) if move else "").grid(row=row, column=8, sticky="ew", padx=4, pady=3)
+                item_ops = ttk.Frame(self.composite_editor)
+                item_ops.grid(row=row, column=11, sticky="ew", padx=4, pady=3)
+                ttk.Button(item_ops, text="+", width=2, command=lambda step_id=step.id, item_id=item.id: self.add_composite_item_after(step_id, item_id)).pack(side="left", padx=(0, 2))
+                ttk.Button(item_ops, text="-", width=2, command=lambda step_id=step.id, item_id=item.id: self.delete_composite_item_by_id(step_id, item_id)).pack(side="left")
+                for widget in (axis_combo, number_widget):
+                    widget.bind("<FocusIn>", lambda _e, step_id=step.id, item_id=item.id: self._select_composite(step_id, item_id), add="+")
+                    widget.bind("<Button-1>", lambda _e, step_id=step.id, item_id=item.id: self._select_composite(step_id, item_id), add="+")
+                row += 1
         self.composite_editor.columnconfigure(1, weight=1)
-        for col in range(3, 6):
+        for col in range(2, 10):
             self.composite_editor.columnconfigure(col, weight=1)
-        self.calculate_composite_time()
+        for col in (10, 11):
+            self.composite_editor.columnconfigure(col, weight=0)
+        self.refresh_composite_action_list()
 
-    def save_composite_step(self, step_id: str) -> None:
+    def _select_composite(self, step_id: str, item_id: str) -> None:
+        self.current_composite_step_id = step_id
+        self.current_composite_item_id = item_id
+
+    def save_composite_step(self, step_id: str, refresh: bool = False, selected_item_id: str = "") -> None:
         current_action = self.get_current_composite_action()
         step = next((item for item in current_action.steps if item.id == step_id), None) if current_action else None
         vars_for_step = self.composite_vars.get(step_id)
         if not step or not vars_for_step:
             return
         step.note = vars_for_step["note"].get().strip()
-        step.delay_ms = _float(vars_for_step["delay_ms"].get(), 0)
-        step.action1_distance_id = self._composite_id_by_option.get(vars_for_step["action1_distance_id"].get(), "")
-        step.action2_distance_id = self._composite_id_by_option.get(vars_for_step["action2_distance_id"].get(), "")
-        step.action3_distance_id = self._composite_id_by_option.get(vars_for_step["action3_distance_id"].get(), "")
-        self.calculate_composite_time()
+        for item in step.items:
+            item_vars = self.composite_vars.get(item.id)
+            if not item_vars:
+                continue
+            axis_text = item_vars["axis"].get()
+            value_text = item_vars["value"].get()
+            number_text = item_vars.get("number", tk.StringVar(value="")).get()
+            if axis_text == "延时":
+                item.kind = "delay"
+                item.axis_id = ""
+                item.distance_id = ""
+                item.delay_ms = _float(value_text, 0) * 1000.0
+            else:
+                item.kind = "motion"
+                item.axis_id = self._composite_axis_id_by_option.get(axis_text, "")
+                item.distance_id = self._composite_distance_id_by_axis_number.get((item.axis_id, number_text), "")
+                item.delay_ms = 0.0
+        motions = [item.distance_id for item in step.items if item.kind == "motion" and item.distance_id]
+        step.action1_distance_id = motions[0] if len(motions) > 0 else ""
+        step.action2_distance_id = motions[1] if len(motions) > 1 else ""
+        step.action3_distance_id = motions[2] if len(motions) > 2 else ""
+        step.delay_ms = sum(item.delay_ms for item in step.items if item.kind == "delay")
+        if selected_item_id:
+            self.current_composite_item_id = selected_item_id
+        if refresh:
+            self.refresh_composite_tab()
+        else:
+            self.calculate_composite_time()
 
     def save_all_composite_steps(self) -> None:
         self.rename_current_composite_action()
-        for step_id in list(self.composite_vars):
-            self.save_composite_step(step_id)
+        current_action = self.get_current_composite_action()
+        for step in list(current_action.steps if current_action else []):
+            self.save_composite_step(step.id)
 
     def add_composite_step(self) -> None:
         self.save_all_composite_steps()
         current_action = self.ensure_current_composite_action()
         if not current_action:
             return
-        current_action.steps.append(CompositeStep(name=f"STEP{len(current_action.steps) + 1}"))
+        current_action.steps.append(CompositeStep(name=f"STEP{len(current_action.steps) + 1}", items=[CompositeStepItem(kind="motion")]))
+        self.refresh_composite_tab()
+
+    def add_composite_step_after(self, step_id: str) -> None:
+        self.save_all_composite_steps()
+        current_action = self.ensure_current_composite_action()
+        if not current_action:
+            return
+        index = next((idx for idx, item in enumerate(current_action.steps) if item.id == step_id), len(current_action.steps) - 1)
+        new_step = CompositeStep(name=f"STEP{index + 2}", items=[CompositeStepItem(kind="motion")])
+        current_action.steps.insert(index + 1, new_step)
+        for idx, step in enumerate(current_action.steps, start=1):
+            step.name = f"STEP{idx}"
+        self.current_composite_step_id = new_step.id
+        self.current_composite_item_id = new_step.items[0].id
         self.refresh_composite_tab()
 
     def delete_composite_step(self) -> None:
-        selected = self.composite_result_tree.selection()
-        if not selected:
-            return
-        selected_id = selected[0]
+        self.delete_composite_step_by_id(self.current_composite_step_id)
+
+    def delete_composite_step_by_id(self, selected_id: str) -> None:
+        self.save_all_composite_steps()
         current_action = self.get_current_composite_action()
-        if not current_action:
+        if not current_action or not selected_id:
             return
         current_action.steps = [step for step in current_action.steps if step.id != selected_id]
         for idx, step in enumerate(current_action.steps, start=1):
             step.name = f"STEP{idx}"
+        self.current_composite_step_id = current_action.steps[0].id if current_action.steps else ""
+        self.current_composite_item_id = current_action.steps[0].items[0].id if current_action.steps and current_action.steps[0].items else ""
+        self.refresh_composite_tab()
+
+    def add_composite_item(self) -> None:
+        self.add_composite_item_after(self.current_composite_step_id, self.current_composite_item_id)
+
+    def add_composite_item_after(self, step_id: str, item_id: str) -> None:
+        self.save_all_composite_steps()
+        current_action = self.get_current_composite_action()
+        if not current_action:
+            return
+        step = next((item for item in current_action.steps if item.id == step_id), None)
+        if not step:
+            step = current_action.steps[-1] if current_action.steps else None
+        if not step:
+            return
+        new_item = CompositeStepItem(kind="motion")
+        index = next((idx for idx, item in enumerate(step.items) if item.id == item_id), len(step.items) - 1)
+        step.items.insert(index + 1, new_item)
+        self.current_composite_step_id = step.id
+        self.current_composite_item_id = new_item.id
+        self.refresh_composite_tab()
+
+    def delete_composite_item(self) -> None:
+        self.delete_composite_item_by_id(self.current_composite_step_id, self.current_composite_item_id)
+
+    def delete_composite_item_by_id(self, step_id: str, item_id: str) -> None:
+        self.save_all_composite_steps()
+        current_action = self.get_current_composite_action()
+        if not current_action or not item_id:
+            return
+        for step in current_action.steps:
+            if step.id == step_id and any(item.id == item_id for item in step.items):
+                step.items = [item for item in step.items if item.id != item_id]
+                if not step.items:
+                    step.items.append(CompositeStepItem(kind="motion"))
+                self.current_composite_step_id = step.id
+                self.current_composite_item_id = step.items[0].id
+                break
         self.refresh_composite_tab()
 
     def edit_composite_step_note(self, event: tk.Event) -> None:
@@ -817,6 +1102,7 @@ class MotionCalculatorApp(tk.Tk):
 
     def _build_detail_panel(self) -> None:
         panel = ttk.Frame(self, padding=(14, 10))
+        self.detail_panel = panel
         panel.grid(row=0, column=2, sticky="nsew")
         panel.columnconfigure(1, weight=1)
         ttk.Label(panel, text="计算详情", font=("Segoe UI", 14, "bold")).grid(
@@ -921,16 +1207,16 @@ class MotionCalculatorApp(tk.Tk):
         self.refresh_calculation_views()
 
     def refresh_axes(self) -> None:
-        self.axis_list.delete(0, tk.END)
-        for axis in self.state_data.axes:
-            self.axis_list.insert(tk.END, axis.name)
+        for item in self.axis_list.get_children():
+            self.axis_list.delete(item)
+        for idx, axis in enumerate(self.state_data.axes, start=1):
+            number = axis.number.strip() or str(idx)
+            self.axis_list.insert("", tk.END, iid=axis.id, values=(number, axis.name))
         if self.state_data.axes and not self.current_axis_id:
             self.current_axis_id = self.state_data.axes[0].id
-        for i, axis in enumerate(self.state_data.axes):
-            if axis.id == self.current_axis_id:
-                self.axis_list.selection_set(i)
-                self.axis_list.see(i)
-                break
+        if self.current_axis_id in self.axis_list.get_children():
+            self.axis_list.selection_set(self.current_axis_id)
+            self.axis_list.see(self.current_axis_id)
         self.update_axis_info()
 
     def ensure_current_axis_action(self) -> None:
@@ -958,7 +1244,12 @@ class MotionCalculatorApp(tk.Tk):
         axis = self.get_current_axis()
         if not axis:
             return
-        dialog = AxisDialog(self, axis)
+        referenced = set()
+        action = next((item for item in self.state_data.actions if item.axis_id == axis.id), None)
+        if action:
+            for distance in action.distances:
+                referenced.update([distance.start_point_id, distance.end_point_id])
+        dialog = AxisDialog(self, axis, referenced)
         if dialog.result:
             idx = self.state_data.axes.index(axis)
             self.state_data.axes[idx] = dialog.result
@@ -966,6 +1257,7 @@ class MotionCalculatorApp(tk.Tk):
             action = next((item for item in self.state_data.actions if item.axis_id == dialog.result.id), None)
             if action:
                 action.name = f"{dialog.result.name} 参数"
+            self.state_data.migrate_coordinate_points()
             self.refresh_all()
 
     def delete_axis(self) -> None:
@@ -983,10 +1275,31 @@ class MotionCalculatorApp(tk.Tk):
         axis = self.get_axis(action.axis_id) if action else None
         if not action or not axis:
             return
-        distance = _float(self.distance_mm_var.get(), 0)
-        if not self.distance_mm_var.get().strip() and self.distance_reg_var.get().strip():
-            distance = register_to_distance(axis, _float(self.distance_reg_var.get(), 0))
-        action.distances.append(DistanceCase(distance=distance, note=self.distance_note_var.get()))
+        if self._is_timer_axis(axis):
+            action.distances.append(
+                DistanceCase(
+                    number=str(len(action.distances) + 1),
+                    duration_s=0.0,
+                    note=self.distance_note_var.get().strip(),
+                )
+            )
+            self.refresh_calculation_views()
+            return
+        start = self._point_from_option(axis, self.distance_start_var.get())
+        end = self._point_from_option(axis, self.distance_end_var.get())
+        if not start or not end:
+            messagebox.showwarning("距离列表", "请先选择起始点和结束点。", parent=self)
+            return
+        distance = end.position_mm - start.position_mm
+        action.distances.append(
+            DistanceCase(
+                number=str(len(action.distances) + 1),
+                distance=distance,
+                note=self.distance_note_var.get().strip(),
+                start_point_id=start.id,
+                end_point_id=end.id,
+            )
+        )
         self.refresh_calculation_views()
 
     def delete_distance(self) -> None:
@@ -998,9 +1311,9 @@ class MotionCalculatorApp(tk.Tk):
         self.refresh_calculation_views()
 
     def on_axis_select(self) -> None:
-        selection = self.axis_list.curselection()
+        selection = self.axis_list.selection()
         if selection:
-            self.current_axis_id = self.state_data.axes[selection[0]].id
+            self.current_axis_id = selection[0]
             self.ensure_current_axis_action()
             self.load_current_action_params()
             self.refresh_calculation_views()
@@ -1012,6 +1325,36 @@ class MotionCalculatorApp(tk.Tk):
             self.current_distance_id = selection[0]
             self.show_selected_distance_detail()
 
+    def edit_distance_cell(self, event: tk.Event) -> None:
+        row_id = self.distance_tree.identify_row(event.y)
+        column = self.distance_tree.identify_column(event.x)
+        if not row_id:
+            return
+        is_timer = self._is_timer_axis()
+        editable_columns = ("#1", "#2", "#3") if is_timer else ("#1", "#7")
+        if column not in editable_columns:
+            return
+        action = self.get_current_action()
+        distance = next((item for item in action.distances if item.id == row_id), None) if action else None
+        if not distance:
+            return
+        if column == "#1":
+            value = simpledialog.askstring("编辑动作编号", "动作编号", initialvalue=distance.number, parent=self)
+            if value is None:
+                return
+            distance.number = value.strip()
+        elif is_timer and column == "#2":
+            value = simpledialog.askstring("编辑运动时间", "运动时间 s", initialvalue=_fmt(distance.duration_s), parent=self)
+            if value is None:
+                return
+            distance.duration_s = max(0.0, _float(value, distance.duration_s))
+        else:
+            value = simpledialog.askstring("编辑运动说明", "运动说明", initialvalue=distance.note, parent=self)
+            if value is None:
+                return
+            distance.note = value.strip()
+        self.refresh_distance_table()
+
     def get_axis(self, axis_id: str) -> Axis | None:
         return next((axis for axis in self.state_data.axes if axis.id == axis_id), None)
 
@@ -1020,6 +1363,58 @@ class MotionCalculatorApp(tk.Tk):
 
     def get_current_action(self) -> MotionAction | None:
         return next((action for action in self.state_data.actions if action.id == self.current_action_id), None)
+
+    def _is_timer_axis(self, axis: Axis | None = None) -> bool:
+        axis = axis or self.get_current_axis()
+        return bool(axis and axis.normalized_type() == "timer")
+
+    def _update_action_input_state(self) -> None:
+        is_timer = self._is_timer_axis()
+        state = "disabled" if is_timer else "normal"
+        for widget in self.param_input_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        if self.recalculate_button:
+            self.recalculate_button.configure(state="disabled" if is_timer else "normal")
+        if hasattr(self, "distance_start_combo"):
+            self.distance_start_combo.configure(state="disabled" if is_timer else "readonly")
+            self.distance_end_combo.configure(state="disabled" if is_timer else "readonly")
+
+    def _point_options(self, axis: Axis) -> list[str]:
+        return [f"{point.name} ({_fmt(point.position_mm)} mm)" for point in axis.points]
+
+    def _point_from_option(self, axis: Axis, option: str) -> AxisPoint | None:
+        options = dict(zip(self._point_options(axis), axis.points, strict=False))
+        return options.get(option)
+
+    def _point_name(self, axis: Axis, point_id: str) -> str:
+        point = next((item for item in axis.points if item.id == point_id), None)
+        return point.name if point else ""
+
+    def _sync_distance_point_options(self) -> None:
+        action = self.get_current_action()
+        axis = self.get_axis(action.axis_id) if action else None
+        if not axis or not hasattr(self, "distance_start_combo"):
+            return
+        options = self._point_options(axis)
+        self.distance_start_combo.configure(values=options)
+        self.distance_end_combo.configure(values=options)
+        if options:
+            if self.distance_start_var.get() not in options:
+                self.distance_start_var.set(options[0])
+            if self.distance_end_var.get() not in options:
+                self.distance_end_var.set(options[min(1, len(options) - 1)])
+
+    def _motion_distance_case(self, distance: DistanceCase) -> DistanceCase:
+        return DistanceCase(
+            id=distance.id,
+            distance=abs(distance.distance),
+            note=distance.note,
+            start_point_id=distance.start_point_id,
+            end_point_id=distance.end_point_id,
+        )
 
     def update_axis_info(self) -> None:
         axis = self.get_current_axis()
@@ -1034,6 +1429,15 @@ class MotionCalculatorApp(tk.Tk):
             self.center_axis_var.set(axis.name)
         if hasattr(self, "detail_axis_var"):
             self.detail_axis_var.set(axis.name)
+        if self._is_timer_axis(axis):
+            self.axis_info.set(
+                f"当前部件: {axis.name}\n"
+                f"编号: {axis.number.strip() or '-'}\n"
+                "类型: 定时器\n"
+                "二级动作只记录运动时间"
+            )
+            self._update_action_input_state()
+            return
         try:
             derived = derive_axis(axis)
             self.axis_info.set(
@@ -1055,11 +1459,18 @@ class MotionCalculatorApp(tk.Tk):
                 var.set("")
             self._loading_action_params = False
             return
+        if self._is_timer_axis():
+            for var in list(self.param_phys_vars.values()) + list(self.param_motor_vars.values()) + list(self.param_reg_vars.values()):
+                var.set("")
+            self._loading_action_params = False
+            self._update_action_input_state()
+            return
         for key, var in self.param_phys_vars.items():
             value = getattr(action.params, key)
             var.set(_fmt(value) if (key in ("vstart", "vstop") or value != 0.0) else "")
         self.sync_all_registers()
         self._loading_action_params = False
+        self._update_action_input_state()
 
     def save_current_action_params(self) -> None:
         action = self.get_current_action()
@@ -1076,7 +1487,7 @@ class MotionCalculatorApp(tk.Tk):
     def sync_param_from_physical(self, key: str) -> None:
         action = self.get_current_action()
         axis = self.get_axis(action.axis_id) if action else None
-        if not action or not axis:
+        if not action or not axis or self._is_timer_axis(axis):
             return
         phys_str = self.param_phys_vars[key].get().strip()
         if not phys_str and key not in ("vstart", "vstop"):
@@ -1099,7 +1510,7 @@ class MotionCalculatorApp(tk.Tk):
     def sync_param_from_motor(self, key: str) -> None:
         action = self.get_current_action()
         axis = self.get_axis(action.axis_id) if action else None
-        if not action or not axis:
+        if not action or not axis or self._is_timer_axis(axis):
             return
         motor_value = _float(self.param_motor_vars[key].get(), 0)
         if key in TIME_FIELDS:
@@ -1117,7 +1528,7 @@ class MotionCalculatorApp(tk.Tk):
     def sync_param_from_register(self, key: str) -> None:
         action = self.get_current_action()
         axis = self.get_axis(action.axis_id) if action else None
-        if not action or not axis:
+        if not action or not axis or self._is_timer_axis(axis):
             return
         reg = _float(self.param_reg_vars[key].get(), 0)
         if key in TIME_FIELDS:
@@ -1213,6 +1624,8 @@ class MotionCalculatorApp(tk.Tk):
         if not distance_ids:
             return False
         for step in composite.steps:
+            if any(item.kind == "motion" and item.distance_id in distance_ids for item in step.items):
+                return True
             if step.action1_distance_id in distance_ids:
                 return True
             if step.action2_distance_id in distance_ids:
@@ -1304,6 +1717,9 @@ class MotionCalculatorApp(tk.Tk):
         self.refresh_composite_tab()
 
     def recalculate_all(self) -> None:
+        if self._is_timer_axis():
+            self.refresh_calculation_views()
+            return
         action = self.get_current_action()
         if action:
             old_params = action.params
@@ -1324,13 +1740,29 @@ class MotionCalculatorApp(tk.Tk):
         axis = self.get_axis(action.axis_id) if action else None
         if not action or not axis:
             return
+        if self._is_timer_axis(axis):
+            self.distance_tree.configure(displaycolumns=("number", "total", "note"))
+            self._update_action_input_state()
+            for distance in action.distances:
+                values = (distance.number, "", "", "", "", _fmt(distance.duration_s), distance.note)
+                self.distance_tree.insert("", tk.END, iid=distance.id, values=values)
+            if action.distances and not self.current_distance_id:
+                self.current_distance_id = action.distances[0].id
+            if self.current_distance_id in self.distance_tree.get_children():
+                self.distance_tree.selection_set(self.current_distance_id)
+            return
+        self.distance_tree.configure(displaycolumns=("number", "start", "end", "distance", "xtarget", "total", "note"))
+        self._sync_distance_point_options()
+        point_by_id = {point.id: point for point in axis.points}
         for distance in action.distances:
+            if distance.start_point_id in point_by_id and distance.end_point_id in point_by_id:
+                distance.distance = point_by_id[distance.end_point_id].position_mm - point_by_id[distance.start_point_id].position_mm
             try:
-                result = calculate_motion(axis, self.state_data.fclk_hz, action.params, distance)
+                result = calculate_motion(axis, self.state_data.fclk_hz, action.params, self._motion_distance_case(distance))
                 xt = distance_to_register(axis, distance.distance).value
-                values = (_fmt(distance.distance), xt, _fmt(result.total_time), distance.note)
+                values = (distance.number, self._point_name(axis, distance.start_point_id), self._point_name(axis, distance.end_point_id), _fmt(distance.distance), xt, _fmt(result.total_time), distance.note)
             except Exception as exc:
-                values = (_fmt(distance.distance), "", str(exc), distance.note)
+                values = (distance.number, self._point_name(axis, distance.start_point_id), self._point_name(axis, distance.end_point_id), _fmt(distance.distance), "", str(exc), distance.note)
             self.distance_tree.insert("", tk.END, iid=distance.id, values=values)
         if action.distances and not self.current_distance_id:
             self.current_distance_id = action.distances[0].id
@@ -1344,8 +1776,13 @@ class MotionCalculatorApp(tk.Tk):
         distance = next((item for item in action.distances if item.id == self.current_distance_id), None) if action else None
         if not action or not axis or not distance:
             return
+        if self._is_timer_axis(axis):
+            self.detail_vars["message"].set(f"定时器二级动作时间：{_fmt(distance.duration_s)} s")
+            self.chart.delete("all")
+            self.chart.create_text(24, 24, anchor="w", text="定时器动作无速度-时间曲线", font=("Segoe UI", 12, "bold"))
+            return
         try:
-            result = calculate_motion(axis, self.state_data.fclk_hz, action.params, distance)
+            result = calculate_motion(axis, self.state_data.fclk_hz, action.params, self._motion_distance_case(distance))
             self.show_detail(result, axis)
             self.draw_chart(result)
         except Exception as exc:

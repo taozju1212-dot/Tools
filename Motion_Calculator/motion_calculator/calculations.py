@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import sqrt
 
-from .models import Axis, CompositeStep, DistanceCase, MotionAction, MotionCase, MotionParams, Strategy, TProfileCase
+from .models import Axis, CompositeStep, CompositeStepItem, DistanceCase, MotionAction, MotionCase, MotionParams, Strategy, TProfileCase
 
 
 VMAX_MAX = 8_388_607
@@ -111,6 +111,8 @@ class TargetTimeResult:
 
 @dataclass
 class CompositeMoveResult:
+    step_item_id: str
+    kind: str
     axis_name: str
     distance_note: str
     distance: float
@@ -147,6 +149,8 @@ class TProfileResult:
 
 def validate_axis(axis: Axis) -> list[str]:
     messages: list[str] = []
+    if axis.normalized_type() == "timer":
+        return messages
     if axis.motor_step_angle <= 0:
         messages.append("电机步距角必须大于 0")
     if axis.microstep not in {1, 2, 4, 8, 16, 32, 64, 128, 256}:
@@ -167,6 +171,15 @@ def derive_axis(axis: Axis) -> AxisDerived:
     messages = validate_axis(axis)
     if messages:
         raise ValueError("; ".join(messages))
+    if axis.normalized_type() == "timer":
+        return AxisDerived(
+            count=0.0,
+            unit_per_motor_rev=0.0,
+            microsteps_per_unit=0.0,
+            unit_name="s",
+            velocity_unit="",
+            acceleration_unit="",
+        )
     count = 360.0 / axis.motor_step_angle * axis.microstep
     mechanism = axis.normalized_type()
     if mechanism == "linear_belt":
@@ -431,24 +444,75 @@ def calculate_composite_motion(
         for distance in action.distances:
             distance_lookup[distance.id] = (axis, action, distance)
 
+    def step_items(step: CompositeStep) -> list[CompositeStepItem]:
+        if step.items:
+            return step.items
+        items: list[CompositeStepItem] = []
+        for distance_id in (step.action1_distance_id, step.action2_distance_id, step.action3_distance_id):
+            if distance_id:
+                axis, _action, _distance = distance_lookup.get(distance_id, (None, None, None))
+                items.append(CompositeStepItem(kind="motion", axis_id=axis.id if axis else "", distance_id=distance_id))
+        if step.delay_ms > 0:
+            items.append(CompositeStepItem(kind="delay", delay_ms=step.delay_ms))
+        return items
+
     step_results: list[CompositeStepResult] = []
     for step in steps:
         move_results: list[CompositeMoveResult] = []
-        for distance_id in (step.action1_distance_id, step.action2_distance_id, step.action3_distance_id):
-            if not distance_id:
+        motion_times: list[float] = []
+        delay_time = 0.0
+        for item in step_items(step):
+            if item.kind == "delay":
+                item_time = max(0.0, item.delay_ms) / 1000.0
+                delay_time += item_time
+                move_results.append(
+                    CompositeMoveResult(
+                        step_item_id=item.id,
+                        kind="delay",
+                        axis_name="延时",
+                        distance_note=f"{item.delay_ms:g} ms",
+                        distance=0.0,
+                        total_time=item_time,
+                    )
+                )
                 continue
-            axis, action, distance = distance_lookup[distance_id]
-            result = calculate_motion(axis, fclk_hz, action.params, distance)
+            if not item.distance_id or item.distance_id not in distance_lookup:
+                continue
+            axis, action, distance = distance_lookup[item.distance_id]
+            if axis.normalized_type() == "timer":
+                item_time = max(0.0, distance.duration_s)
+                motion_times.append(item_time)
+                move_results.append(
+                    CompositeMoveResult(
+                        step_item_id=item.id,
+                        kind="timer",
+                        axis_name=axis.name,
+                        distance_note=distance.note,
+                        distance=0.0,
+                        total_time=item_time,
+                    )
+                )
+                continue
+            motion_distance = DistanceCase(
+                id=distance.id,
+                distance=abs(distance.distance),
+                note=distance.note,
+                start_point_id=distance.start_point_id,
+                end_point_id=distance.end_point_id,
+            )
+            result = calculate_motion(axis, fclk_hz, action.params, motion_distance)
+            motion_times.append(result.total_time)
             move_results.append(
                 CompositeMoveResult(
+                    step_item_id=item.id,
+                    kind="motion",
                     axis_name=axis.name,
                     distance_note=distance.note,
                     distance=distance.distance,
                     total_time=result.total_time,
                 )
             )
-        motion_time = max((item.total_time for item in move_results), default=0.0)
-        delay_time = max(0.0, step.delay_ms) / 1000.0
+        motion_time = max(motion_times, default=0.0)
         step_results.append(
             CompositeStepResult(
                 step=step,

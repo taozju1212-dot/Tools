@@ -14,7 +14,7 @@ from .calculations import (
     tvmax_to_register,
     velocity_to_register,
 )
-from .models import AppState, Axis, CompositeAction, DistanceCase, MotionAction
+from .models import AppState, Axis, CompositeAction, CompositeStepItem, DistanceCase, MotionAction
 
 
 MECHANISM_NAMES = {
@@ -22,6 +22,7 @@ MECHANISM_NAMES = {
     "rotary": "步进旋转",
     "leadscrew": "步进丝杆",
     "custom": "自定义换算",
+    "timer": "定时器",
 }
 
 
@@ -58,7 +59,24 @@ def _move_label(lookup: dict[str, tuple[Axis, MotionAction, DistanceCase]], dist
         return ""
     axis, _action, distance = item
     note = distance.note.strip() or f"{distance.distance:g}"
+    if axis.normalized_type() == "timer":
+        return f"{axis.name} / {note} / {distance.duration_s:g}s"
     return f"{axis.name} / {note} / {distance.distance:g}"
+
+
+def _point_name(axis: Axis, point_id: str) -> str:
+    point = next((item for item in axis.points if item.id == point_id), None)
+    return point.name if point else ""
+
+
+def _motion_distance(distance: DistanceCase) -> DistanceCase:
+    return DistanceCase(
+        id=distance.id,
+        distance=abs(distance.distance),
+        note=distance.note,
+        start_point_id=distance.start_point_id,
+        end_point_id=distance.end_point_id,
+    )
 
 
 def _auto_width(ws) -> None:
@@ -125,6 +143,9 @@ def export_excel(path: str | Path, state: AppState) -> None:
         axis = _action_axis(state, action)
         if not axis:
             continue
+        if axis.normalized_type() == "timer":
+            ws1.append([_axis_index(state, axis), axis.name, "", "", "", "", "", "", "", "", "", ""])
+            continue
         params = action.params
         ws1.append([
             _axis_index(state, axis),
@@ -142,24 +163,27 @@ def export_excel(path: str | Path, state: AppState) -> None:
         ])
 
     ws2 = wb.create_sheet("距离坐标")
-    ws2.append(["轴名称", "距离备注", "距离 mm", "X_TARGET", "曲线", "峰值速度寄存器", "运动时间 s"])
+    ws2.append(["轴名称", "距离备注", "起始点", "结束点", "距离 mm", "X_TARGET", "曲线", "峰值速度寄存器", "运动时间 s"])
     for action in state.actions:
         axis = _action_axis(state, action)
         if not axis:
             continue
         for distance in action.distances:
+            if axis.normalized_type() == "timer":
+                ws2.append([axis.name, distance.note, "", "", "", "", "定时器", "", _fmt_time(distance.duration_s)])
+                continue
             try:
-                result = calculate_motion(axis, state.fclk_hz, action.params, distance)
+                result = calculate_motion(axis, state.fclk_hz, action.params, _motion_distance(distance))
                 profile = result.profile_type
                 vpeak = _velocity_reg(axis, state, result.vpeak)
                 total = _fmt_time(result.total_time)
-                xtarget = result.xtarget_register.value
+                xtarget = distance_to_register(axis, distance.distance).value
             except Exception:
                 profile = ""
                 vpeak = ""
                 total = ""
                 xtarget = distance_to_register(axis, distance.distance).value
-            ws2.append([axis.name, distance.note, distance.distance, xtarget, profile, vpeak, total])
+            ws2.append([axis.name, distance.note, _point_name(axis, distance.start_point_id), _point_name(axis, distance.end_point_id), distance.distance, xtarget, profile, vpeak, total])
 
     ws3 = wb.create_sheet("一级动作时间")
     ws3.append(["编号", "动作名称", "时间 s"])
@@ -176,42 +200,57 @@ def export_excel(path: str | Path, state: AppState) -> None:
 
     ws4 = wb.create_sheet("组合STEP列表")
     ws4.append([
-        "组合编号", "组合名称", "STEP", "备注", "延时 ms",
-        "动作1", "动作2", "动作3", "STEP时间 s", "组合动作时间 s",
+        "组合编号", "组合名称", "STEP", "备注", "动作轴", "距离或延时",
+        "动作时间 s", "STEP时间 s", "组合动作时间 s",
     ])
     lookup = _distance_lookup(state)
     row = 2
     for action_idx, action in enumerate(state.composite_actions, start=1):
         result = composite_results.get(action.id)
         result_by_step = {item.step.id: item for item in result.steps} if result else {}
+        result_by_item = {move.step_item_id: move for step_result in result.steps for move in step_result.move_results} if result else {}
         start_row = row
         for step in action.steps:
             step_result = result_by_step.get(step.id)
-            ws4.append([
-                _composite_number(action, action_idx),
-                action.name,
-                step.name,
-                step.note,
-                step.delay_ms,
-                _move_label(lookup, step.action1_distance_id),
-                _move_label(lookup, step.action2_distance_id),
-                _move_label(lookup, step.action3_distance_id),
-                _fmt_time(step_result.total_time) if step_result else "",
-                _fmt_time(result.total_time) if result else "",
-            ])
-            row += 1
+            step_start = row
+            items = step.items or [CompositeStepItem(kind="motion", distance_id=step.action1_distance_id)]
+            for item in items:
+                move = result_by_item.get(item.id)
+                if item.kind == "delay":
+                    axis_name = "延时"
+                    action_label = f"{item.delay_ms:g} ms"
+                else:
+                    axis, _motion_action, distance = lookup.get(item.distance_id, (None, None, None))
+                    axis_name = axis.name if axis else ""
+                    action_label = _move_label(lookup, item.distance_id)
+                ws4.append([
+                    _composite_number(action, action_idx),
+                    action.name,
+                    step.name,
+                    step.note,
+                    axis_name,
+                    action_label,
+                    _fmt_time(move.total_time) if move else "",
+                    _fmt_time(step_result.total_time) if step_result else "",
+                    _fmt_time(result.total_time) if result else "",
+                ])
+                row += 1
+            if row > step_start + 1:
+                ws4.merge_cells(start_row=step_start, start_column=3, end_row=row - 1, end_column=3)
+                ws4.merge_cells(start_row=step_start, start_column=4, end_row=row - 1, end_column=4)
+                ws4.merge_cells(start_row=step_start, start_column=8, end_row=row - 1, end_column=8)
         if row > start_row + 1:
-            ws4.merge_cells(start_row=start_row, start_column=10, end_row=row - 1, end_column=10)
+            ws4.merge_cells(start_row=start_row, start_column=9, end_row=row - 1, end_column=9)
 
     for ws in wb.worksheets:
         ws.freeze_panes = "A2"
         _auto_width(ws)
 
-    for row in ws2.iter_rows(min_row=2, min_col=7, max_col=7):
+    for row in ws2.iter_rows(min_row=2, min_col=9, max_col=9):
         row[0].number_format = "0.000"
     for row in ws3.iter_rows(min_row=2, min_col=3, max_col=3):
         row[0].number_format = "0.000"
-    for row in ws4.iter_rows(min_row=2, min_col=9, max_col=10):
+    for row in ws4.iter_rows(min_row=2, min_col=7, max_col=9):
         for cell in row:
             cell.number_format = "0.000"
 
